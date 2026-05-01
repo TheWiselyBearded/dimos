@@ -44,20 +44,26 @@ jobs:
 
       - name: Run tests
         run: |
-          /entrypoint.sh bash -c "source .venv/bin/activate && _DIMOS_COV=1 coverage run -m pytest --durations=0 -m 'not (tool or mujoco)' && coverage xml && coverage report"
+          /entrypoint.sh bash -c "source .venv/bin/activate && _DIMOS_COV=1 coverage run -m pytest --durations=0 -m 'not (tool or mujoco)' && coverage xml"
 
       - name: Run mypy
         if: ${{ !cancelled() }}
         run: |
           /entrypoint.sh bash -c "source .venv/bin/activate && MYPYPATH=/opt/ros/humble/lib/python3.10/site-packages mypy dimos"
 
-      - name: Upload coverage to Codecov
+      - name: Upload coverage
         uses: codecov/codecov-action@v6
         with:
           disable_search: true
           fail_ci_if_error: true
-          files: coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          use_oidc: true
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v6
+        with:
+          report_type: test_results
+          use_oidc: true
 
       - name: Check disk space
         if: failure()
