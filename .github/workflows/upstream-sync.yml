@@ -1,0 +1,67 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/dimensionalOS/dimos.git
+          git fetch upstream main
+
+      - name: Check for new commits
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count main..upstream/main)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Fork is $BEHIND commits behind upstream/main"
+
+      - name: Create sync branch
+        if: steps.check.outputs.behind != '0'
+        run: |
+          BRANCH="upstream-sync/$(date -u +%Y-%m-%d)"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          git checkout -B "$BRANCH" main
+          git merge --no-edit upstream/main || {
+            echo "Merge conflict — pushing branch with conflict markers for manual resolution"
+            git merge --abort || true
+            git merge upstream/main --no-commit --no-ff || true
+            git commit -am "chore: upstream sync (CONFLICTS — resolve manually)" || true
+          }
+          git push -f origin "$BRANCH"
+
+      - name: Open or update PR
+        if: steps.check.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+          if [ -z "$EXISTING" ]; then
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore: sync with dimensionalOS/dimos upstream ($(date -u +%Y-%m-%d))" \
+              --body "Automated sync of ${{ steps.check.outputs.behind }} new commit(s) from upstream/main. Review the diff and merge when ready."
+          else
+            echo "PR #$EXISTING already open for $BRANCH"
+          fi
