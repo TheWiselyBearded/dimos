@@ -23,9 +23,12 @@ if TYPE_CHECKING:
 # Import LCM types
 from dimos_lcm.sensor_msgs import CameraInfo as LCMCameraInfo
 from dimos_lcm.std_msgs.Header import Header
+import cv2
 import numpy as np
 
 from dimos.types.timestamped import Timestamped
+
+FISHEYE_DISTORTION_MODELS = {"equidistant", "fisheye", "kannala_brandt4"}
 
 
 class CameraInfo(Timestamped):
@@ -195,6 +198,61 @@ class CameraInfo(Timestamped):
     def set_D_coeffs(self, D: np.ndarray) -> None:  # type: ignore[type-arg]
         """Set distortion coefficients from numpy array."""
         self.D = D.flatten().tolist()
+
+    @property
+    def is_fisheye(self) -> bool:
+        """Check if this camera uses a fisheye distortion model."""
+        return self.distortion_model.lower() in FISHEYE_DISTORTION_MODELS
+
+    def rectified(
+        self,
+        balance: float = 0.0,
+        new_size: tuple[int, int] | None = None,
+    ) -> CameraInfo:
+        """Compute a new CameraInfo representing the undistorted output.
+
+        Args:
+            balance: Trade-off between retaining FOV and minimizing black borders.
+                     0.0 = all output pixels valid (cropped), 1.0 = keep all source pixels.
+            new_size: Optional (width, height) for the output. Defaults to original size.
+
+        Returns:
+            New CameraInfo with distortion_model="" and D=[], with updated K/P
+            reflecting the undistorted image intrinsics.
+        """
+        K = self.get_K_matrix()
+        D = self.get_D_coeffs()
+        R = self.get_R_matrix()
+        size = (self.width, self.height)
+        out_size = new_size if new_size is not None else size
+
+        if not self.distortion_model or self.distortion_model == "none":
+            Knew = K.copy()
+        elif self.is_fisheye:
+            Knew = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                K, D[:4], size, R, balance=balance, new_size=out_size,
+            )
+        else:
+            Knew, _ = cv2.getOptimalNewCameraMatrix(
+                K, D, size, alpha=balance, newImgSize=out_size,
+            )
+
+        # Build projection matrix P from Knew
+        P = np.zeros((3, 4), dtype=np.float64)
+        P[:3, :3] = Knew
+
+        return CameraInfo(
+            height=out_size[1],
+            width=out_size[0],
+            distortion_model="",
+            D=[],
+            K=Knew.flatten().tolist(),
+            R=R.flatten().tolist(),
+            P=P.flatten().tolist(),
+            binning_x=self.binning_x,
+            binning_y=self.binning_y,
+            frame_id=self.frame_id,
+        )
 
     def lcm_encode(self) -> bytes:
         """Convert to LCM CameraInfo message."""

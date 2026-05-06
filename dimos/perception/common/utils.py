@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 from typing import Union
 
 import cv2
@@ -26,7 +27,9 @@ import torch
 import yaml  # type: ignore[import-untyped]
 
 from dimos.msgs.geometry_msgs import Pose, Quaternion, Vector3
+from dimos.msgs.sensor_msgs import CameraInfo as DIMOSCameraInfo
 from dimos.msgs.sensor_msgs import Image
+from dimos.msgs.sensor_msgs.Image import ImageFormat
 from dimos.msgs.std_msgs import Header
 from dimos.types.manipulation import ObjectData
 from dimos.types.vector import Vector
@@ -69,7 +72,10 @@ __all__ = [
     "project_3d_points_to_2d",
     "project_3d_points_to_2d_cpu",
     "project_3d_points_to_2d_cuda",
+    "remap_image",
     "rectify_image",
+    "create_undistortion_maps",
+    "UndistortionMapCache",
     "setup_logger",
     "torch",
     "yaml",
@@ -188,13 +194,159 @@ def load_camera_info_opencv(yaml_path: str) -> tuple[np.ndarray, np.ndarray]:  #
     return K, dist
 
 
-def rectify_image(image: Image, camera_matrix: np.ndarray, dist_coeffs: np.ndarray) -> Image:  # type: ignore[type-arg]
-    """CPU rectification using OpenCV. Preserves backend by caller.
+def create_undistortion_maps(
+    camera_info: DIMOSCameraInfo,
+    balance: float = 0.0,
+    new_size: tuple[int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray, DIMOSCameraInfo]:  # type: ignore[type-arg]
+    """Precompute undistortion remap tables for a given camera.
 
-    Returns an Image with numpy or cupy data depending on caller choice.
+    Supports both standard (plumb_bob) and fisheye (equidistant/kannala_brandt4)
+    distortion models. The returned maps can be reused across frames via
+    ``remap_image`` or ``UndistortionMapCache``.
+
+    Args:
+        camera_info: Source camera calibration with distortion parameters.
+        balance: 0.0 keeps all output pixels valid (cropped); 1.0 retains
+                 the full source FOV (black borders may appear).
+        new_size: Optional (width, height) for the output image.
+
+    Returns:
+        (map1, map2, rectified_camera_info) where maps are for ``cv2.remap``
+        and rectified_camera_info describes the undistorted output.
     """
-    rect = cv2.undistort(image.data, camera_matrix, dist_coeffs)
+    rect_info = camera_info.rectified(balance=balance, new_size=new_size)
+    K = camera_info.get_K_matrix()
+    D = camera_info.get_D_coeffs()
+    R = camera_info.get_R_matrix()
+    Knew = rect_info.get_K_matrix()
+    out_size = (rect_info.width, rect_info.height)
+
+    if camera_info.is_fisheye:
+        map1, map2 = cv2.fisheye.initUndistortRectifyMap(
+            K, D[:4], R, Knew, out_size, cv2.CV_16SC2,
+        )
+    else:
+        map1, map2 = cv2.initUndistortRectifyMap(
+            K, D, R, Knew, out_size, cv2.CV_16SC2,
+        )
+
+    return map1, map2, rect_info
+
+
+def remap_image(
+    image: Image,
+    map1: np.ndarray,  # type: ignore[type-arg]
+    map2: np.ndarray,  # type: ignore[type-arg]
+    interpolation: int | None = None,
+) -> Image:
+    """Apply precomputed undistortion maps to an image.
+
+    Args:
+        image: Source image to remap.
+        map1, map2: Remap tables from ``create_undistortion_maps``.
+        interpolation: OpenCV interpolation flag. If None, auto-selects
+            INTER_NEAREST for depth formats (avoids blending depth values)
+            and INTER_LINEAR for everything else.
+
+    Returns:
+        Remapped Image with the same format, frame_id and timestamp.
+    """
+    if interpolation is None:
+        if image.format in (ImageFormat.DEPTH, ImageFormat.DEPTH16):
+            interpolation = cv2.INTER_NEAREST
+        else:
+            interpolation = cv2.INTER_LINEAR
+
+    rect = cv2.remap(image.data, map1, map2, interpolation)
     return Image(data=rect, format=image.format, frame_id=image.frame_id, ts=image.ts)
+
+
+def rectify_image(
+    image: Image,
+    camera_info: DIMOSCameraInfo,
+    balance: float = 0.0,
+    new_size: tuple[int, int] | None = None,
+) -> tuple[Image, DIMOSCameraInfo]:
+    """Undistort an image using its camera calibration.
+
+    Convenience wrapper around ``create_undistortion_maps`` + ``remap_image``.
+    For streaming pipelines where the same camera is used across frames,
+    prefer ``UndistortionMapCache`` to avoid recomputing maps every call.
+
+    Supports both standard (plumb_bob) and fisheye (equidistant/kannala_brandt4)
+    distortion models, dispatching automatically based on
+    ``camera_info.distortion_model``.
+
+    Args:
+        image: Distorted source image.
+        camera_info: Camera calibration with distortion parameters.
+        balance: 0.0 = all output pixels valid; 1.0 = keep full source FOV.
+        new_size: Optional (width, height) for the output.
+
+    Returns:
+        (rectified_image, rectified_camera_info)
+    """
+    map1, map2, rect_info = create_undistortion_maps(camera_info, balance, new_size)
+    return remap_image(image, map1, map2), rect_info
+
+
+class UndistortionMapCache:
+    """Thread-safe cache for precomputed undistortion remap tables.
+
+    Designed for streaming pipelines where the camera calibration is constant
+    across frames. Maps are computed once on first access and reused thereafter.
+
+    Example::
+
+        cache = UndistortionMapCache()
+        for image in image_stream:
+            rect_img, rect_info = cache.rectify(image, camera_info)
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple, tuple[np.ndarray, np.ndarray, DIMOSCameraInfo]] = {}  # type: ignore[type-arg]
+        self._lock = threading.Lock()
+
+    def _key(
+        self,
+        camera_info: DIMOSCameraInfo,
+        balance: float,
+        new_size: tuple[int, int] | None,
+    ) -> tuple:
+        return (
+            tuple(camera_info.K),
+            tuple(camera_info.D),
+            camera_info.distortion_model,
+            camera_info.width,
+            camera_info.height,
+            balance,
+            new_size,
+        )
+
+    def get_maps(
+        self,
+        camera_info: DIMOSCameraInfo,
+        balance: float = 0.0,
+        new_size: tuple[int, int] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, DIMOSCameraInfo]:  # type: ignore[type-arg]
+        """Return cached (map1, map2, rectified_camera_info), computing if needed."""
+        key = self._key(camera_info, balance, new_size)
+        with self._lock:
+            if key not in self._cache:
+                self._cache[key] = create_undistortion_maps(camera_info, balance, new_size)
+            return self._cache[key]
+
+    def rectify(
+        self,
+        image: Image,
+        camera_info: DIMOSCameraInfo,
+        balance: float = 0.0,
+        new_size: tuple[int, int] | None = None,
+    ) -> tuple[Image, DIMOSCameraInfo]:
+        """Undistort an image using cached maps."""
+        map1, map2, rect_info = self.get_maps(camera_info, balance, new_size)
+        return remap_image(image, map1, map2), rect_info
 
 
 def project_3d_points_to_2d_cuda(
