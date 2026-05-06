@@ -80,12 +80,14 @@ def _cipher() -> Any:
 
 def encrypt(data: bytes) -> bytes:
     enc = _cipher().encryptor()
-    return enc.update(data) + enc.finalize()
+    out: bytes = enc.update(data) + enc.finalize()
+    return out
 
 
 def decrypt(data: bytes) -> bytes:
     dec = _cipher().decryptor()
-    return dec.update(data) + dec.finalize()
+    out: bytes = dec.update(data) + dec.finalize()
+    return out
 
 
 def build_packet(instruction: int, payload: bytes = b"") -> bytes:

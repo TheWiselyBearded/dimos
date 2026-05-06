@@ -111,7 +111,9 @@ def discover(timeout: float = 2.0, iface_ip: str | None = None) -> list[Go2Devic
         iface_ip: pin multicast to this local IPv4 address. If None, probe every
             non-tunnel interface in parallel.
     """
-    targets = [(None, iface_ip)] if iface_ip else list(_candidate_ifaces())
+    targets: list[tuple[str | None, str]] = (
+        [(None, iface_ip)] if iface_ip else list(_candidate_ifaces())
+    )
     if not targets:
         logger.warning("no usable interfaces found for Go2 discovery")
         return []
