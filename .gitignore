@@ -46,8 +46,11 @@ build/
 # Ignore data directory but keep .lfs subdirectory
 data/*
 !data/.lfs/
-FastSAM-x.pt
-yolo11n.pt
+
+# Local datasets (videos, recordings) — never commit
+/datasets/
+# Model weights — never commit, fetch out-of-band
+*.pt
 
 /thread_monitor_report.csv
 
