@@ -1,0 +1,29 @@
+# Viture XR — low-noise mode. Smaller display, more aggressive edge filter,
+# more raycasting cycles between updates, depth-confidence weighting.
+# Equivalent to:
+#   python -u mac_viture_spatial_foxglove.py --display-width 512 \
+#     --objects-process-every-n 3 --map-publish-every-n 15 --raycast-every-n 4 \
+#     --depth-edge-threshold 0.06 --depth-edge-dilate 3 \
+#     --voxel-min-observations 3 --use-depth-confidence --points-stride 10
+
+mode = "viture-recording"
+
+[runtime]
+display_width = 512
+
+[depth]
+provider = "depthpro"
+device = "mps"
+
+# Flags below are valid on the Viture script but not first-class in the entry's
+# config schema; passed through verbatim.
+extra_args = [
+    "--objects-process-every-n", "3",
+    "--map-publish-every-n", "15",
+    "--raycast-every-n", "4",
+    "--depth-edge-threshold", "0.06",
+    "--depth-edge-dilate", "3",
+    "--voxel-min-observations", "3",
+    "--use-depth-confidence",
+    "--points-stride", "10",
+]

@@ -1,0 +1,13 @@
+# Viture XR — recorded clip with default settings (DepthPro, ARKit pose).
+# Equivalent to:
+#   python -u mac_viture_spatial_foxglove.py
+
+mode = "viture-recording"
+
+[depth]
+provider = "depthpro"
+device = "mps"
+
+[runtime]
+# The viture script has its own defaults for display_width / max_fps; leaving
+# these unset means we don't override.

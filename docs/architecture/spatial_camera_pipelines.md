@@ -74,17 +74,17 @@ Per-frame inner loop (both scripts, [mac_iphone_spatial_foxglove.py:825+](../../
 
 ## 2. The two scripts at a glance
 
-| Aspect              | Viture script                                                                 | iPhone script                                                                  |
-|---------------------|-------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
-| File                | [`mac_viture_spatial_foxglove.py`](../../mac_viture_spatial_foxglove.py)      | [`mac_iphone_spatial_foxglove.py`](../../mac_iphone_spatial_foxglove.py)        |
-| Source modes        | `recording` (mp4 + RecordingLoader poses) / `live` (`VitureClient` over TCP)  | `video` (any mp4/MOV)                                                           |
-| Pose                | ARKit 4×4 from sensor                                                         | identity OR ORB+depth-PnP visual odometry                                       |
-| Right-cam available | Yes (stereo possible)                                                         | No                                                                              |
-| Default depth       | `depthpro`                                                                    | `depthpro`                                                                      |
-| Default detection   | On                                                                            | On                                                                              |
-| Save/load           | Not yet                                                                       | `--save-map` / `--load-map`                                                     |
-| Default video path  | `~/Downloads/VITURE_recording_…_undistorted_left.mp4`                         | `dimos/datasets/iphone/phxLivingRoom.MOV` (gitignored — see [.gitignore](../../.gitignore)) |
-| Default HFOV        | 46° (Viture sensor, undistorted)                                              | 62° (iPhone wide camera)                                                        |
+| Aspect              | Viture script                                                                 | iPhone script                                                                  | Unitree replay script                                                          |
+|---------------------|-------------------------------------------------------------------------------|---------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| File                | [`mac_viture_spatial_foxglove.py`](../../mac_viture_spatial_foxglove.py)      | [`mac_iphone_spatial_foxglove.py`](../../mac_iphone_spatial_foxglove.py)        | [`mac_unitree_replay_foxglove.py`](../../mac_unitree_replay_foxglove.py)        |
+| Source modes        | `recording` / `live`                                                          | `video` (any mp4/MOV)                                                           | bundled `unitree_go2_lidar_corrected` dataset                                   |
+| Pose                | ARKit 4×4 from sensor                                                         | identity OR ORB+depth-PnP visual odometry                                       | dataset-supplied odometry                                                       |
+| Right-cam / lidar   | Right cam (stereo possible)                                                   | None                                                                            | Lidar (raw, not depth-derived)                                                  |
+| Default depth       | `depthpro`                                                                    | `depthpro`                                                                      | n/a (uses lidar)                                                                |
+| Default detection   | On                                                                            | On                                                                              | On                                                                              |
+| Save/load           | Not yet                                                                       | `--save-map` / `--load-map`                                                     | Not yet                                                                         |
+| CLI flags           | Many (depth/pose/voxel/object knobs)                                          | Many (same + iPhone extras)                                                     | **None** — script is hardcoded                                                  |
+| Default HFOV        | 46° (undistorted)                                                             | 62° (iPhone wide)                                                               | 819.55 fx (cal-derived)                                                         |
 
 ---
 
@@ -331,9 +331,69 @@ In the Foxglove 3D panel, pin **Fixed frame = world** and Display frame = world.
 
 ---
 
+## 9b. Unified entry: GUI + TOML + shell orchestrator
+
+Four-tier entry layered on top of the underlying scripts:
+
+- **[`configs/camera_pipeline.toml`](../../configs/camera_pipeline.toml)** — defaults for mode, depth provider, pose mode, runtime params, detection knobs, save/load. Source-of-truth for "what does the GUI start with".
+- **[`configs/presets/*.toml`](../../configs/presets/)** — quick-launch sample commands. Each preset is a fully-formed TOML that re-creates one of the canonical invocations (iPhone DepthPro, iPhone DA3-large, Viture default, Viture noise-tuned, Unitree replay). Drop a new `.toml` here and the GUI picks it up on next launch.
+- **[`run_camera_pipeline.py`](../../run_camera_pipeline.py)** — reads the TOML, applies CLI overrides, translates the merged config into the right `mac_*_foxglove.py` invocation, and `subprocess.run`s it. Use `--dry-run` to see resolved argv without launching. Supports a top-level or per-section **`extra_args = [...]`** array for verbatim passthrough — needed for any underlying-script flag the entry doesn't first-class.
+- **[`run_pipeline_gui.py`](../../run_pipeline_gui.py)** — Tkinter (stdlib, no deps) launcher. **Quick presets** dropdown + "Load to form" / "Launch preset" buttons at top. Form sections below are **collapsible** (Mode + Source expanded by default; Depth/Pose/Tracking/Map/Runtime collapsed). File pickers for video/recording/load-bundle paths. Mode-aware section visibility: Pose section hides for Viture; DA3 size hides when DepthPro is selected; everything hides for Unitree-replay (script takes no flags). Live foxglove-bridge status indicator. Launch button shells out to `run_pipeline.sh --headless …`.
+- **[`run_pipeline.sh`](../../run_pipeline.sh)** — shell orchestrator. With **no args** it opens the GUI. With `--headless` + args it spawns the foxglove bridge (or reuses one already on `:8765`) and the camera pipeline in two macOS Terminal.app windows.
+
+Flow:
+
+```
+./run_pipeline.sh                ──► run_pipeline_gui.py (Tk window)
+                                       │
+                                       │  user clicks Launch
+                                       ▼
+                                 ./run_pipeline.sh --headless --mode video --save ...
+                                       │
+                                       ├─► Terminal #1: foxglove bridge (or reuse)
+                                       └─► Terminal #2: run_camera_pipeline.py ──► mac_iphone_spatial_foxglove.py
+```
+
+Why the split:
+
+- TOML lives in source control and captures session-survival defaults.
+- GUI is the discoverability layer — agents/humans new to the system don't have to know the flag matrix.
+- Python entry is the single place that knows which CLI flag belongs to which underlying script — keeps Viture/iPhone-specific arg differences in one place rather than burning users for forgetting `--right-video` etc.
+- Shell wraps bridge management because the bridge has its own lifecycle and a known port; stuffing that into the Python entry would couple pipeline lifetime to bridge lifetime for no reason.
+
+When you add a new mode (e.g. RealSense, Android):
+
+1. Add a `--mode` choice in `run_camera_pipeline.py` and a translation branch in `build_command()`.
+2. Add a `[mode_specific]` section in the TOML with the new fields.
+3. Add a Tk `LabelFrame` in `run_pipeline_gui.py` (mirror `src_video` / `src_viture`) and wire visibility into `_update_mode_visibility`.
+
+Caveats today (iPhone-only flags — fixable mechanically):
+
+- `--save-map` / `--load-map`, `--da3-model`, `--objects-*` are wired into the iPhone script only. The entry warns and ignores them for `viture-*` modes. Mirror them into the Viture script following the same pattern.
+
+---
+
 ## 10. Common run commands
 
 The Viture script always needs `KMP_DUPLICATE_LIB_OK=TRUE OMP_NUM_THREADS=1` because PyTorch + OpenMP libs collide on macOS.
+
+**GUI launcher** (recommended for interactive use):
+```
+./run_pipeline.sh
+```
+Opens a Tkinter window — pick mode, dataset, depth model, save/load options
+via buttons + file pickers, click Launch.
+
+**Headless** (scripted runs, identical to what the GUI invokes under the hood):
+```
+./run_pipeline.sh --headless                                 # all defaults from TOML
+./run_pipeline.sh --headless --save                          # persist under ~/.dimos/sessions
+./run_pipeline.sh --headless --mode viture-live
+./run_pipeline.sh --headless --config configs/my.toml --save
+./run_pipeline.sh --headless --mode video --depth da3 --da3-model da3-large
+```
+
+Direct script invocation (no entry, no bridge auto-launch):
 
 **Viture, recorded, DepthPro** (default):
 ```

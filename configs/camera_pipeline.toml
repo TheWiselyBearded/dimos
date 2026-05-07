@@ -1,0 +1,64 @@
+# Default configuration for run_camera_pipeline.py
+#
+# Override individual settings via CLI flags (run_camera_pipeline.py --help)
+# or copy this file and pass --config /path/to/your.toml.
+#
+# Mode selects the underlying script:
+#   video             -> mac_iphone_spatial_foxglove.py (any mp4/MOV, no pose)
+#   viture-recording  -> mac_viture_spatial_foxglove.py --source recording
+#   viture-live       -> mac_viture_spatial_foxglove.py --source live
+
+mode = "video"
+
+[runtime]
+# Absolute path to the Python interpreter (xr-nav conda env).
+python = "/opt/anaconda3/envs/xr-nav/bin/python"
+# Resample input color to this width before depth inference.
+display_width = 768
+# Upper bound on per-frame publish rate. The depth model usually sets the real ceiling.
+max_fps = 5
+
+[pose]
+# vo       — ORB+depth-PnP visual odometry (works on monocular video).
+# identity — camera fixed at origin (debug only; map collapses to one viewpoint).
+# arkit    — only valid for viture-recording / viture-live (uses sensor pose).
+mode = "vo"
+
+[depth]
+# depthpro — sharp metric depth, ~1-3s/frame on M-series. Best default.
+# da3      — fast (~140ms/frame) but often non-metric; small model can produce flat output.
+# stereo   — only valid for viture-recording with --right-video supplied.
+provider = "depthpro"
+device = "mps"  # mps | cuda | cpu
+
+# DA3-specific (ignored when provider != "da3")
+da3_model = "da3-small"  # da3-small | da3-base | da3-large
+da3_trust_is_metric = false  # set true only after verifying raw range looks metric
+
+[detection]
+enabled = true
+class_aware = true        # require name match for 3D distance merging
+decay = true              # delete objects that go unseen while in-frustum
+distance_threshold = 0.4  # m — 3D center merge radius
+pixel_threshold = 60.0    # px — 2D-pixel fallback merge radius
+
+[map]
+# Persist the voxel map + tracked objects to a single .pkl bundle.
+save = false
+output_dir = "~/.dimos/sessions"
+# {ts} expands to YYYYMMDD_HHMMSS at launch time.
+save_filename = "session_{ts}.pkl"
+load_path = ""               # empty string means do not load
+save_every_n_frames = 0      # 0 disables periodic save (only on-exit)
+
+[video]
+# Source for mode = "video"
+path = "datasets/iphone/phxLivingRoom.MOV"
+hfov_deg = 62.0  # iPhone wide ~62, ultrawide ~106, 2x telephoto ~30
+no_loop = false  # exit at end-of-video instead of looping
+
+[viture]
+# Source for mode = "viture-*". Empty strings fall back to the script defaults.
+video = ""
+right_video = ""
+recording_dir = ""

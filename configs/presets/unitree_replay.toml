@@ -1,0 +1,6 @@
+# Unitree Go2 — replay the bundled lidar+camera dataset into Foxglove.
+# The unitree replay script takes no flags; mode is enough.
+# Equivalent to:
+#   python -u mac_unitree_replay_foxglove.py
+
+mode = "unitree-replay"

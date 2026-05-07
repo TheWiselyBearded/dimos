@@ -1,0 +1,31 @@
+# iPhone — DA3-large (~1.5GB weights) + VO. Faster than DepthPro and more
+# robust than DA3-small on low-information content.
+# Equivalent to:
+#   python -u mac_iphone_spatial_foxglove.py --depth da3 --da3-model da3-large --pose vo --display-width 768 --max-fps 2
+
+mode = "video"
+
+[runtime]
+display_width = 768
+max_fps = 2
+
+[depth]
+provider = "da3"
+da3_model = "da3-large"
+device = "mps"
+
+[pose]
+mode = "vo"
+
+[detection]
+enabled = true
+class_aware = true
+decay = true
+
+[video]
+path = "datasets/iphone/phxLivingRoom.MOV"
+hfov_deg = 62.0
+no_loop = false
+
+[map]
+save = false

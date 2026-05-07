@@ -1,0 +1,29 @@
+# iPhone — DepthPro + VO at 768 wide, 2 fps. Best quality on monocular video.
+# Equivalent to:
+#   python -u mac_iphone_spatial_foxglove.py --depth depthpro --pose vo --display-width 768 --max-fps 2
+
+mode = "video"
+
+[runtime]
+display_width = 768
+max_fps = 2
+
+[depth]
+provider = "depthpro"
+device = "mps"
+
+[pose]
+mode = "vo"
+
+[detection]
+enabled = true
+class_aware = true
+decay = true
+
+[video]
+path = "datasets/iphone/phxLivingRoom.MOV"
+hfov_deg = 62.0
+no_loop = false
+
+[map]
+save = false
