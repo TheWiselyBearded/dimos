@@ -27,6 +27,7 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+import pickle
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -698,6 +699,61 @@ class SpatialMemoryAdapter:
 
 
 # ===========================================================================
+#  Map bundle save/load
+# ===========================================================================
+
+MAP_BUNDLE_VERSION = 1
+
+
+class _NullObjectDB:
+    """Minimal stand-in so we can save a bundle when --no-detect was used."""
+
+    def to_state(self) -> dict:
+        return {"pending": {}, "permanent": {}, "track_id_map": {}, "confidence": {}, "config": {}}
+
+
+def save_map_bundle(path: Path, voxel_map, object_db, extra: dict | None = None) -> None:
+    """Pickle a versioned bundle of voxel + object state.
+
+    Pickle is used (not npz) because ObjectDB Object instances carry nested
+    PointCloud2 / Vector3 / open3d objects that don't serialize cleanly to
+    pure-numpy. Bundles are tied to the dimos Object class layout — re-saving
+    after schema changes is the recovery path.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "version": MAP_BUNDLE_VERSION,
+        "saved_at": time.time(),
+        "voxel_map": voxel_map.to_state(),
+        "object_db": object_db.to_state(),
+        "extra": extra or {},
+    }
+    with open(path, "wb") as f:
+        pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+    n_vox = len(state["voxel_map"]["keys"])
+    n_perm = len(state["object_db"]["permanent"])
+    n_pend = len(state["object_db"]["pending"])
+    print(f"[save] wrote {path} — {n_vox} voxels, {n_perm} permanent + {n_pend} pending objects")
+
+
+def load_map_bundle(path: Path) -> dict:
+    if not path.exists():
+        sys.exit(f"--load-map: bundle not found at {path}")
+    with open(path, "rb") as f:
+        state = pickle.load(f)
+    v = state.get("version")
+    if v != MAP_BUNDLE_VERSION:
+        sys.exit(f"--load-map: unsupported bundle version {v} (expected {MAP_BUNDLE_VERSION})")
+    n_vox = len(state["voxel_map"]["keys"])
+    n_perm = len(state["object_db"]["permanent"])
+    n_pend = len(state["object_db"]["pending"])
+    age = time.time() - state.get("saved_at", time.time())
+    print(f"[load] read {path} — {n_vox} voxels, {n_perm} permanent + {n_pend} pending objects, "
+          f"saved {age/60:.1f}m ago")
+    return state
+
+
+# ===========================================================================
 #  Main loop
 # ===========================================================================
 
@@ -729,6 +785,17 @@ def main() -> None:
                         help="exit after the video ends instead of looping")
     parser.add_argument("--no-detect", action="store_true",
                         help="disable YOLOE 2D detection + ObjectDB tracking (on by default)")
+    parser.add_argument("--save-map", type=Path, default=None,
+                        help="On exit, save the voxel map + tracked objects to this .pkl bundle. "
+                             "Pair with --load-map to resume a previous capture")
+    parser.add_argument("--load-map", type=Path, default=None,
+                        help="Load a previously-saved .pkl map bundle before starting. "
+                             "Note: the loaded map is in the prior session's world frame, so "
+                             "it only aligns when the new VO session starts at the same physical "
+                             "pose (e.g., re-running the same clip from the start)")
+    parser.add_argument("--save-map-every-n", type=int, default=0,
+                        help="If >0 and --save-map is set, also write the bundle every N frames "
+                             "in addition to on-exit. Useful for crash safety on long sessions")
 
     perf = parser.add_argument_group("latency tunables")
     perf.add_argument("--objects-process-every-n", type=int, default=OBJECTS_PROCESS_EVERY_N)
@@ -822,6 +889,15 @@ def main() -> None:
     voxel_map = VoxelMap(voxel_size=args.voxel_size, max_range=VOXEL_MAX_RANGE_M)
     raycast_cfg = RaycastConfig(
         subsample=VOXEL_RAYCAST_SUBSAMPLE, max_misses=VOXEL_RAYCAST_MAX_MISSES)
+
+    if args.load_map is not None:
+        bundle = load_map_bundle(args.load_map)
+        voxel_map.load_state(bundle["voxel_map"])
+        if object_db is not None:
+            object_db.load_state(bundle["object_db"])
+        elif bundle["object_db"]["permanent"] or bundle["object_db"]["pending"]:
+            print("[load] WARNING: bundle contains objects but --no-detect was passed; "
+                  "objects will not be loaded")
 
     spatial_mem = SpatialMemoryAdapter(db_path=args.clip_db) if args.enable_clip_memory else None
 
@@ -1021,11 +1097,27 @@ def main() -> None:
                       f"d={drange} pts={len(cam_pts_s)} pos=({pos[0]:+.2f},{pos[1]:+.2f},{pos[2]:+.2f}) "
                       f"voxels={voxel_map.size}{det_info}")
 
+            if (args.save_map is not None and args.save_map_every_n > 0
+                    and n > 0 and n % args.save_map_every_n == 0):
+                try:
+                    save_map_bundle(args.save_map, voxel_map,
+                                    object_db if object_db is not None else _NullObjectDB(),
+                                    extra={"frames": n})
+                except Exception as e:
+                    print(f"[save] periodic save failed: {e}")
+
             time.sleep(max(0.0, period - (time.perf_counter() - t_start)))
 
     except KeyboardInterrupt:
         print(f"\nstopped after {n} frames.")
     finally:
+        if args.save_map is not None:
+            try:
+                save_map_bundle(args.save_map, voxel_map,
+                                object_db if object_db is not None else _NullObjectDB(),
+                                extra={"frames": n})
+            except Exception as e:
+                print(f"[save] final save failed: {e}")
         try:
             source.close()
         except Exception:

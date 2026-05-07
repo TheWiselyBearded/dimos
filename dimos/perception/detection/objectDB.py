@@ -287,6 +287,47 @@ class ObjectDB:
                     self._confidence[obj_id] = new_conf
         return deleted
 
+    def to_state(self) -> dict:
+        """Snapshot the database for save/load. Object instances are kept as-is
+        so the bundle round-trips exactly when re-pickled."""
+        with self._lock:
+            return {
+                "pending": dict(self._pending_objects),
+                "permanent": dict(self._objects),
+                "track_id_map": dict(self._track_id_map),
+                "confidence": dict(self._confidence),
+                "config": {
+                    "distance_threshold": self._distance_threshold,
+                    "min_detections": self._min_detections,
+                    "pending_ttl_s": self._pending_ttl_s,
+                    "track_id_ttl_s": self._track_id_ttl_s,
+                    "class_aware_matching": self._class_aware_matching,
+                    "frustum_match_pixel_threshold": self._frustum_match_pixel_threshold,
+                    "enable_decay": self._enable_decay,
+                    "confidence_init": self._confidence_init,
+                    "confidence_step_up": self._confidence_step_up,
+                    "confidence_step_down": self._confidence_step_down,
+                },
+            }
+
+    def load_state(self, state: dict, replace: bool = True) -> None:
+        """Repopulate from a dict produced by ``to_state``.
+
+        Configuration knobs (thresholds, decay rates) are *not* restored from
+        the bundle — the caller's constructor args win. Only the object data
+        and track/confidence maps are loaded.
+        """
+        with self._lock:
+            if replace:
+                self._pending_objects.clear()
+                self._objects.clear()
+                self._track_id_map.clear()
+                self._confidence.clear()
+            self._pending_objects.update(state.get("pending", {}))
+            self._objects.update(state.get("permanent", {}))
+            self._track_id_map.update(state.get("track_id_map", {}))
+            self._confidence.update(state.get("confidence", {}))
+
     def _delete_object(self, object_id: str) -> None:
         """Remove an object from both tiers and any track_id mapping."""
         if object_id in self._pending_objects:
