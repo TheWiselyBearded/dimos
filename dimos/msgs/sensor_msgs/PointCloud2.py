@@ -99,6 +99,19 @@ class PointCloud2(Timestamped):
         # Remove non-picklable objects
         del state["_pcd_tensor"]
         state["_pcd_legacy_cache"] = None
+        # ``functools.cached_property`` stores its memoised value under the
+        # attribute's own name in ``__dict__``. The Open3D geometry classes
+        # below are pybind11 C++ objects and not picklable; if any of these
+        # properties were touched during processing (e.g. while publishing
+        # scene entities) the cached value would otherwise be serialised and
+        # fail with "cannot pickle 'open3d.cpu.pybind.geometry.*' object".
+        # They will simply be recomputed lazily on the next access after load.
+        for cached in (
+            "axis_aligned_bounding_box",
+            "oriented_bounding_box",
+            "bounding_box_dimensions",
+        ):
+            state.pop(cached, None)
         return state
 
     def __setstate__(self, state: dict[str, object]) -> None:
