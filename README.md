@@ -134,6 +134,86 @@ Dimensional is agent native -- "vibecode" your robots in natural language and bu
 
 # Installation
 
+## This Fork — Mac Demos + Reachy Replay
+
+This fork (`TheWiselyBearded/dimos`) adds Mac-side spatial-memory entry points and a Reachy Mini replay pipeline on top of upstream `dimensionalOS/dimos`. It also vendors [`xr-nav`](https://github.com/TheWiselyBearded/xr-nav) as a git submodule (used by the Mac demos for DA3 depth and voxel-mapping helpers).
+
+New top-level scripts in this fork:
+
+| Script | Purpose |
+|--------|---------|
+| `mac_viture_spatial_foxglove.py` | VITURE XR glasses → DepthPro / DA3 → VoxelMap + YOLOE object tracking → Foxglove |
+| `mac_viture_da3_foxglove.py` | Lighter Viture demo (DA3 depth only, no object DB) |
+| `mac_iphone_spatial_foxglove.py` | iPhone Record3D recording → spatial memory pipeline → Foxglove |
+| `reachy_replay_spatial_foxglove.py` | Replay a recorded Reachy Mini session through the spatial pipeline |
+| `run_reachy_replay.sh` / `run_reachy_replay_depthpro.sh` | Launchers that spawn the dimos LCM→Foxglove bridge + the Reachy sidecar Foxglove server |
+| `roommap_to_dimos.py` | Bridge: convert a room-map cloud-fuse PLY into a dimos `VoxelMap.pkl` |
+| `run_pipeline_gui.py` | Tkinter launcher for the spatial pipelines (reads `configs/camera_pipeline.toml`) |
+
+### Clone with submodules
+
+```sh
+# Fresh clone — pulls dimos + xr-nav together
+git clone --recurse-submodules https://github.com/TheWiselyBearded/dimos.git
+cd dimos
+
+# Already cloned without submodules? Initialize them now:
+git submodule update --init --recursive
+
+# Pull later updates and bump submodules to the recorded SHA:
+git pull --recurse-submodules
+```
+
+### Set up the conda env
+
+The Mac scripts assume a conda env named `xr-nav`. The launcher shell scripts hardcode `/opt/anaconda3/envs/xr-nav/bin/python` — if your conda lives elsewhere, override with the `PYTHON=...` env var when invoking them.
+
+```sh
+# 1. Create the env (deps come from xr-nav/environment.yml)
+conda env create -f xr-nav/environment.yml
+conda activate xr-nav
+
+# 2. Install this fork of dimos into the same env
+pip install -e '.'
+#   Optional extras (see "Python Install" below): unitree, sim, manipulation, foxglove
+#   pip install -e '.[unitree,sim]'
+
+# 3. (Optional) Reachy SDK — only needed for on-robot recording scripts
+pip install -e 'xr-nav[reachy]'
+
+# 4. Sanity check
+python -c "import dimos, xr_nav; print(dimos.__version__)"
+```
+
+### Quickstart — Reachy Mini replay
+
+```sh
+# Drop a recording at /path/to/reachy_trial/ (camera.mp4 + *.jsonl)
+./run_reachy_replay.sh /path/to/reachy_trial          # DA3-small depth (fast)
+./run_reachy_replay_depthpro.sh /path/to/reachy_trial # DepthPro depth (sharper, slower)
+```
+
+Connect Foxglove Studio to **both** `ws://localhost:8765` (dimos bridge: depth, map, TF) and `ws://localhost:8766` (sidecar: IMU, joints, head pose, DOA, audio). Pre-built layouts ship at `foxglove_layouts/reachy_replay_{primary,sidecar}.json`.
+
+### Quickstart — VITURE / iPhone
+
+```sh
+# VITURE glasses (live TCP stream from viture_server on the glasses)
+KMP_DUPLICATE_LIB_OK=TRUE OMP_NUM_THREADS=1 \
+  python -u mac_viture_spatial_foxglove.py --source live --depth depthpro
+
+# iPhone Record3D recording (offline playback)
+python -u mac_iphone_spatial_foxglove.py --source recording --depth depthpro \
+  --recording-dir /path/to/iphone_session
+
+# In another terminal — Foxglove bridge for either:
+python -m dimos.utils.cli.foxglove_bridge.run_foxglove_bridge
+```
+
+> Quality ranking on M-series Macs (MPS backend): **DepthPro > DA3-small >> DA3-metric**. Prefer DepthPro unless throughput matters.
+
+---
+
 ## Interactive Install
 
 ```sh
