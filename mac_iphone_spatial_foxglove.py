@@ -41,7 +41,10 @@ REPO = Path(__file__).resolve().parent
 DEFAULT_VIDEO = REPO / "datasets" / "iphone" / "phxLivingRoom.MOV"
 
 sys.path.insert(0, str(REPO / "xr-nav" / "src"))
-sys.path.insert(0, str(REPO / "xr-nav" / "awesome-depth-anything-3" / "src"))
+# DA3 source: macOS uses the awesome-depth-anything-3 fork;
+# Linux/Windows use the official ByteDance Depth-Anything-3.
+_da3_dir = "awesome-depth-anything-3" if sys.platform == "darwin" else "Depth-Anything-3"
+sys.path.insert(0, str(REPO / "xr-nav" / _da3_dir / "src"))
 
 # iPhone wide camera HFOV is roughly 60-65deg; user can override with --hfov-deg.
 HFOV_DEG = 62.0
@@ -422,7 +425,17 @@ class DA3Estimator(DepthEstimator):
                  force_relative: bool = False):
         from depth_anything_3.api import DepthAnything3
         print(f"[depth] loading {model_name} on {device}...")
-        self._model = DepthAnything3(model_name=model_name, device=device)
+        if sys.platform == "darwin":
+            # macOS: the awesome-depth-anything-3 fork loads weights in its constructor.
+            self._model = DepthAnything3(model_name=model_name, device=device)
+            self._metric_model = False
+        else:
+            # Linux/Windows official ByteDance repo: the constructor only builds the
+            # architecture -- weights must be loaded via from_pretrained, then moved to device.
+            self._model = DepthAnything3.from_pretrained(
+                f"depth-anything/{model_name.upper()}").to(device)
+            # Official Prediction.is_metric is unreliable; trust the model name.
+            self._metric_model = "metric" in model_name.lower()
         self._res = process_res
         self._conf_thresh = conf_threshold
         self._force_relative = force_relative
@@ -442,7 +455,7 @@ class DA3Estimator(DepthEstimator):
                 torch.cuda.empty_cache()
         except Exception:
             pass
-        is_metric = bool(getattr(pred, "is_metric", 0)) and not self._force_relative
+        is_metric = (self._metric_model or bool(getattr(pred, "is_metric", 0))) and not self._force_relative
         if not self._raw_logged:
             r_pos = raw[raw > 0]
             r_range_val = float(r_pos.max() - r_pos.min()) if r_pos.size else 0.0
