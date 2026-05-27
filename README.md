@@ -229,6 +229,7 @@ To set up your system dependencies, follow one of these guides:
 - 🟩 [Ubuntu 22.04 / 24.04](docs/installation/ubuntu.md)
 - 🟩 [NixOS / General Linux](docs/installation/nix.md)
 - 🟧 [macOS](docs/installation/osx.md)
+- [Windows (WSL2)](docs/installation/wsl.md)
 
 > Full system requirements, tested configs, and dependency tiers: [docs/requirements.md](docs/requirements.md)
 
