@@ -49,7 +49,7 @@ class PipelineConfig:
     pose_mode: str = "vo"
     depth_provider: str = "depthpro"
     depth_device: str = "mps"
-    da3_model: str = "da3-small"
+    da3_model: str = "da3metric-large"
     da3_trust_is_metric: bool = False
     det_enabled: bool = True
     det_class_aware: bool = True
@@ -394,8 +394,10 @@ class PipelineGUI:
         self.da3_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         ttk.Label(self.da3_row, text="DA3 size:").pack(side="left", padx=4)
         ttk.Combobox(self.da3_row, textvariable=self.var_da3,
-                     values=["da3-small", "da3-base", "da3-large"], state="readonly",
-                     width=12).pack(side="left", padx=4)
+                     values=["da3-small", "da3-base", "da3-large",
+                             "da3-giant", "da3metric-large",
+                             "da3nested-giant-large"], state="readonly",
+                     width=22).pack(side="left", padx=4)
         ttk.Checkbutton(self.da3_row, text="Trust is_metric (rare; usually leave off)",
                         variable=self.var_da3_trust).pack(side="left", padx=8)
 

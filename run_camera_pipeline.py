@@ -129,12 +129,9 @@ def build_command(cfg: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
     if d.get("device"):
         argv += ["--device", d["device"]]
     if d.get("provider") == "da3":
-        # --da3-model only exists on the iPhone script today; the viture script
-        # hardcodes da3-small. Skip for viture modes to avoid arg errors.
-        if mode == "video":
-            argv += ["--da3-model", d.get("da3_model", "da3-small")]
-            if d.get("da3_trust_is_metric"):
-                argv.append("--da3-trust-is-metric")
+        argv += ["--da3-model", d.get("da3_model", "da3metric-large")]
+        if mode == "video" and d.get("da3_trust_is_metric"):
+            argv.append("--da3-trust-is-metric")
 
     # Runtime
     rt = cfg.get("runtime", {})
@@ -247,8 +244,12 @@ def main() -> None:
                         help="Override [mode]")
     parser.add_argument("--video", type=Path, help="Override [video.path]")
     parser.add_argument("--depth", choices=["depthpro", "da3"], help="Override [depth.provider]")
-    parser.add_argument("--da3-model", choices=["da3-small", "da3-base", "da3-large"],
-                        help="Override [depth.da3_model]")
+    parser.add_argument("--da3-model",
+                        choices=["da3-small", "da3-base", "da3-large",
+                                 "da3-giant", "da3metric-large",
+                                 "da3nested-giant-large"],
+                        help="Override [depth.da3_model]. Recommend da3metric-large "
+                             "for consistent (true metric) depth.")
     parser.add_argument("--pose", choices=["vo", "identity"], help="Override [pose.mode]")
     parser.add_argument("--display-width", type=int, help="Override [runtime.display_width]")
     parser.add_argument("--max-fps", type=float, help="Override [runtime.max_fps]")

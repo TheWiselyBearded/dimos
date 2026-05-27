@@ -1,0 +1,164 @@
+{
+  "configById": {
+    "3D!head": {
+      "cameraState": {
+        "distance": 1.5,
+        "perspective": true,
+        "phi": 60,
+        "thetaOffset": 45,
+        "targetOffset": [0, 0, 0],
+        "target": [0, 0, 0],
+        "fovy": 45,
+        "near": 0.05,
+        "far": 100
+      },
+      "followMode": "follow-pose",
+      "followTf": "reachy_base",
+      "scene": { "transforms": { "axisScale": 0.3, "lineWidth": 2 } },
+      "topics": {
+        "/reachy/head_pose": { "visible": true },
+        "/reachy/imu": { "visible": true }
+      }
+    },
+    "Plot!imu_accel": {
+      "title": "IMU linear acceleration (m/s²)",
+      "paths": [
+        { "value": "/reachy/imu.linear_acceleration.x", "enabled": true, "timestampMethod": "receiveTime", "color": "#e74c3c", "label": "ax" },
+        { "value": "/reachy/imu.linear_acceleration.y", "enabled": true, "timestampMethod": "receiveTime", "color": "#2ecc71", "label": "ay" },
+        { "value": "/reachy/imu.linear_acceleration.z", "enabled": true, "timestampMethod": "receiveTime", "color": "#3498db", "label": "az" }
+      ],
+      "minYValue": null, "maxYValue": null,
+      "showLegend": true, "showXAxisLabels": true, "showYAxisLabels": true,
+      "xAxisVal": "timestamp", "isSynced": true,
+      "followingViewWidth": 30
+    },
+    "Plot!imu_gyro": {
+      "title": "IMU angular velocity (rad/s)",
+      "paths": [
+        { "value": "/reachy/imu.angular_velocity.x", "enabled": true, "timestampMethod": "receiveTime", "color": "#e74c3c", "label": "gx" },
+        { "value": "/reachy/imu.angular_velocity.y", "enabled": true, "timestampMethod": "receiveTime", "color": "#2ecc71", "label": "gy" },
+        { "value": "/reachy/imu.angular_velocity.z", "enabled": true, "timestampMethod": "receiveTime", "color": "#3498db", "label": "gz" }
+      ],
+      "minYValue": null, "maxYValue": null,
+      "showLegend": true, "xAxisVal": "timestamp", "isSynced": true,
+      "followingViewWidth": 30
+    },
+    "Plot!joints_head": {
+      "title": "Head joints (rad)",
+      "paths": [
+        { "value": "/reachy/joints.head[0]", "enabled": true, "timestampMethod": "receiveTime", "label": "h0" },
+        { "value": "/reachy/joints.head[1]", "enabled": true, "timestampMethod": "receiveTime", "label": "h1" },
+        { "value": "/reachy/joints.head[2]", "enabled": true, "timestampMethod": "receiveTime", "label": "h2" },
+        { "value": "/reachy/joints.head[3]", "enabled": true, "timestampMethod": "receiveTime", "label": "h3" },
+        { "value": "/reachy/joints.head[4]", "enabled": true, "timestampMethod": "receiveTime", "label": "h4" },
+        { "value": "/reachy/joints.head[5]", "enabled": true, "timestampMethod": "receiveTime", "label": "h5" },
+        { "value": "/reachy/joints.head[6]", "enabled": true, "timestampMethod": "receiveTime", "label": "h6" }
+      ],
+      "minYValue": null, "maxYValue": null,
+      "showLegend": true, "xAxisVal": "timestamp", "isSynced": true,
+      "followingViewWidth": 30
+    },
+    "Plot!joints_antennas": {
+      "title": "Antennas (rad)",
+      "paths": [
+        { "value": "/reachy/joints.antennas[0]", "enabled": true, "timestampMethod": "receiveTime", "color": "#9b59b6", "label": "left" },
+        { "value": "/reachy/joints.antennas[1]", "enabled": true, "timestampMethod": "receiveTime", "color": "#f39c12", "label": "right" }
+      ],
+      "minYValue": null, "maxYValue": null,
+      "showLegend": true, "xAxisVal": "timestamp", "isSynced": true,
+      "followingViewWidth": 30
+    },
+    "Plot!doa_angle": {
+      "title": "Direction of arrival (deg)",
+      "paths": [
+        { "value": "/reachy/doa.angle_deg", "enabled": true, "timestampMethod": "receiveTime", "color": "#1abc9c" }
+      ],
+      "minYValue": 0, "maxYValue": 360,
+      "showLegend": false, "xAxisVal": "timestamp", "isSynced": true,
+      "followingViewWidth": 30
+    },
+    "Plot!audio_level": {
+      "title": "Audio RMS",
+      "paths": [
+        { "value": "/reachy/audio/level.value", "enabled": true, "timestampMethod": "receiveTime", "color": "#e67e22" }
+      ],
+      "minYValue": 0, "maxYValue": null,
+      "showLegend": false, "xAxisVal": "timestamp", "isSynced": true,
+      "followingViewWidth": 30
+    },
+    "Indicator!speech": {
+      "path": "/reachy/doa.speech",
+      "style": "background",
+      "fallbackColor": "#444444",
+      "fallbackLabel": "no speech",
+      "rules": [
+        { "operator": "=", "rawValue": "true",  "color": "#2ecc71", "label": "SPEECH" },
+        { "operator": "=", "rawValue": "false", "color": "#444444", "label": "no speech" }
+      ]
+    },
+    "Gauge!imu_temp": {
+      "path": "/reachy/imu/temperature.value",
+      "minValue": 20,
+      "maxValue": 80,
+      "colorMode": "colormap",
+      "colorMap": "turbo",
+      "reverse": false
+    },
+    "RawMessages!latest": {
+      "topicPath": "/reachy/joints",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "showFullMessageForDiff": false,
+      "expansion": "all"
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "first": {
+      "first": "3D!head",
+      "second": {
+        "first": "Plot!imu_accel",
+        "second": "Plot!imu_gyro",
+        "direction": "column",
+        "splitPercentage": 50
+      },
+      "direction": "row",
+      "splitPercentage": 45
+    },
+    "second": {
+      "first": {
+        "first": "Plot!joints_head",
+        "second": "Plot!joints_antennas",
+        "direction": "row",
+        "splitPercentage": 65
+      },
+      "second": {
+        "first": {
+          "first": "Plot!doa_angle",
+          "second": "Indicator!speech",
+          "direction": "row",
+          "splitPercentage": 70
+        },
+        "second": {
+          "first": "Plot!audio_level",
+          "second": {
+            "first": "Gauge!imu_temp",
+            "second": "RawMessages!latest",
+            "direction": "row",
+            "splitPercentage": 30
+          },
+          "direction": "row",
+          "splitPercentage": 50
+        },
+        "direction": "column",
+        "splitPercentage": 50
+      },
+      "direction": "column",
+      "splitPercentage": 50
+    },
+    "direction": "column",
+    "splitPercentage": 55
+  }
+}

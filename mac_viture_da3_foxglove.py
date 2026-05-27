@@ -21,11 +21,13 @@ Pair with the bridge in another terminal:
 
 Run:
     KMP_DUPLICATE_LIB_OK=TRUE OMP_NUM_THREADS=1 \\
-        /opt/anaconda3/envs/xr-nav/bin/python -u mac_viture_da3_foxglove.py
+        /opt/anaconda3/envs/xr-nav/bin/python -u mac_viture_da3_foxglove.py \\
+        --da3-model da3metric-large
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
@@ -49,9 +51,9 @@ sys.path.insert(0, str(REPO / "xr-nav" / "awesome-depth-anything-3" / "src"))
 PUBLISH_FPS = 10
 HFOV_DEG = 46.0
 
-DA3_MODEL = "da3-small"
-DA3_DEVICE = "mps"
-DA3_RES = 504
+DA3_MODEL = "da3metric-large"  # default; override with --da3-model
+DA3_DEVICE = "mps"             # default; override with --da3-device
+DA3_RES = 504                  # default; override with --da3-res
 
 DEPTH_NEAR_M = 0.3
 DEPTH_FAR_M = 6.0
@@ -247,6 +249,25 @@ def transform_points(c2w_opencv: np.ndarray, pts_cam: np.ndarray) -> np.ndarray:
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--da3-model", default=DA3_MODEL,
+                        choices=["da3-small", "da3-base", "da3-large",
+                                 "da3-giant", "da3metric-large",
+                                 "da3nested-giant-large"],
+                        help="DA3 variant. da3metric-large (default) returns true "
+                             "metric depth so per-frame scale stays consistent. "
+                             "da3-small/base/large are scale-ambiguous.")
+    parser.add_argument("--da3-device", default=DA3_DEVICE,
+                        choices=["mps", "cuda", "cpu"])
+    parser.add_argument("--da3-res", type=int, default=DA3_RES,
+                        help="DA3 processing resolution (default: 504)")
+    args = parser.parse_args()
+    da3_model = args.da3_model
+    da3_device = args.da3_device
+    da3_res = args.da3_res
+
     if not VIDEO.exists():
         sys.exit(f"missing video: {VIDEO}")
 
@@ -297,10 +318,10 @@ def main():
     print(f"display: {DW}x{DH} (scale={scale:.2f})  HFOV={HFOV_DEG}°")
 
     # ---- DA3 ----
-    print(f"loading DA3 model '{DA3_MODEL}' on {DA3_DEVICE}...")
+    print(f"loading DA3 model '{da3_model}' on {da3_device}...")
     from depth_anything_3.api import DepthAnything3
     t0 = time.monotonic()
-    da3 = DepthAnything3(model_name=DA3_MODEL, device=DA3_DEVICE)
+    da3 = DepthAnything3(model_name=da3_model, device=da3_device)
     print(f"  DA3 ready in {time.monotonic() - t0:.1f}s on {da3.device}")
 
     # ---- Detection (2D + 3D, like mac_unitree_replay_foxglove.py) ----
@@ -367,7 +388,7 @@ def main():
             small_rgb = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2RGB)
             t_da3 = time.perf_counter()
             try:
-                pred = da3.inference(image=[small_rgb], process_res=DA3_RES)
+                pred = da3.inference(image=[small_rgb], process_res=da3_res)
             except Exception as e:
                 print(f"  frame {n}: DA3 failed: {e}")
                 n += 1

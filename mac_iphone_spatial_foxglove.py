@@ -27,13 +27,12 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
-import pickle
 import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -180,6 +179,11 @@ class SourceFrame:
     color_bgr: np.ndarray
     ts: float
     frame_idx: int
+    # Optional external camera-to-world (OpenCV optical: X right, Y down, Z fwd).
+    # When set and --pose external is selected, the main loop uses this instead
+    # of running monocular VO. Replay scripts that have a recorded pose stream
+    # (e.g. Reachy head_pose.jsonl) can attach it here.
+    c2w: Optional[np.ndarray] = None
 
 
 class VideoSource:
@@ -413,7 +417,7 @@ class DepthProEstimator(DepthEstimator):
 class DA3Estimator(DepthEstimator):
     name = "da3"
 
-    def __init__(self, model_name: str = "da3-small", device: str = "mps",
+    def __init__(self, model_name: str = "da3metric-large", device: str = "mps",
                  process_res: int = 504, conf_threshold: float = 0.0,
                  force_relative: bool = False):
         from depth_anything_3.api import DepthAnything3
@@ -496,11 +500,13 @@ class DA3Estimator(DepthEstimator):
 def make_depth_estimator(kind: str, device: str = "mps",
                          da3_conf_threshold: float = 0.0,
                          da3_force_relative: bool = False,
-                         da3_model: str = "da3-small") -> DepthEstimator:
+                         da3_model: str = "da3metric-large",
+                         da3_process_res: int = 504) -> DepthEstimator:
     if kind == "depthpro":
         return DepthProEstimator(device=device)
     if kind == "da3":
         return DA3Estimator(model_name=da3_model, device=device,
+                            process_res=da3_process_res,
                             conf_threshold=da3_conf_threshold,
                             force_relative=da3_force_relative)
     raise ValueError(f"unknown depth kind: {kind}")
@@ -699,61 +705,6 @@ class SpatialMemoryAdapter:
 
 
 # ===========================================================================
-#  Map bundle save/load
-# ===========================================================================
-
-MAP_BUNDLE_VERSION = 1
-
-
-class _NullObjectDB:
-    """Minimal stand-in so we can save a bundle when --no-detect was used."""
-
-    def to_state(self) -> dict:
-        return {"pending": {}, "permanent": {}, "track_id_map": {}, "confidence": {}, "config": {}}
-
-
-def save_map_bundle(path: Path, voxel_map, object_db, extra: dict | None = None) -> None:
-    """Pickle a versioned bundle of voxel + object state.
-
-    Pickle is used (not npz) because ObjectDB Object instances carry nested
-    PointCloud2 / Vector3 / open3d objects that don't serialize cleanly to
-    pure-numpy. Bundles are tied to the dimos Object class layout — re-saving
-    after schema changes is the recovery path.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    state = {
-        "version": MAP_BUNDLE_VERSION,
-        "saved_at": time.time(),
-        "voxel_map": voxel_map.to_state(),
-        "object_db": object_db.to_state(),
-        "extra": extra or {},
-    }
-    with open(path, "wb") as f:
-        pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
-    n_vox = len(state["voxel_map"]["keys"])
-    n_perm = len(state["object_db"]["permanent"])
-    n_pend = len(state["object_db"]["pending"])
-    print(f"[save] wrote {path} — {n_vox} voxels, {n_perm} permanent + {n_pend} pending objects")
-
-
-def load_map_bundle(path: Path) -> dict:
-    if not path.exists():
-        sys.exit(f"--load-map: bundle not found at {path}")
-    with open(path, "rb") as f:
-        state = pickle.load(f)
-    v = state.get("version")
-    if v != MAP_BUNDLE_VERSION:
-        sys.exit(f"--load-map: unsupported bundle version {v} (expected {MAP_BUNDLE_VERSION})")
-    n_vox = len(state["voxel_map"]["keys"])
-    n_perm = len(state["object_db"]["permanent"])
-    n_pend = len(state["object_db"]["pending"])
-    age = time.time() - state.get("saved_at", time.time())
-    print(f"[load] read {path} — {n_vox} voxels, {n_perm} permanent + {n_pend} pending objects, "
-          f"saved {age/60:.1f}m ago")
-    return state
-
-
-# ===========================================================================
 #  Main loop
 # ===========================================================================
 
@@ -762,13 +713,21 @@ def main() -> None:
     parser.add_argument("--video", type=Path, default=DEFAULT_VIDEO,
                         help="Path to the .mp4/.MOV/etc. to play back")
     parser.add_argument("--depth", choices=["depthpro", "da3"], default="depthpro")
-    parser.add_argument("--da3-model", default="da3-small",
-                        choices=["da3-small", "da3-base", "da3-large"],
-                        help="DA3-only: model size. base/large need more VRAM but produce "
-                             "wider depth dynamic range on tricky content")
-    parser.add_argument("--pose", choices=["identity", "vo"], default="vo",
+    parser.add_argument("--da3-model", default="da3metric-large",
+                        choices=["da3-small", "da3-base", "da3-large",
+                                 "da3-giant", "da3metric-large",
+                                 "da3nested-giant-large"],
+                        help="DA3 variant. da3metric-large (default) returns true metric "
+                             "depth so per-frame scale is consistent across frames. "
+                             "da3-small/base/large are scale-ambiguous and require the "
+                             "first-frame scale fit (drifts on long sessions). "
+                             "da3nested-giant-large is highest quality but slowest.")
+    parser.add_argument("--pose", choices=["identity", "vo", "external"], default="vo",
                         help="identity = camera fixed at origin (debug). "
-                             "vo = ORB+depth-PnP visual odometry (default)")
+                             "vo = ORB+depth-PnP visual odometry (default). "
+                             "external = read SourceFrame.c2w supplied by the frame source "
+                             "(e.g. Reachy head_pose.jsonl via the replay script). Falls back "
+                             "to identity for any frame missing c2w.")
     parser.add_argument("--device", default="mps", choices=["mps", "cuda", "cpu"])
     parser.add_argument("--enable-clip-memory", action="store_true",
                         help="record CLIP-embedded frames to ChromaDB for text/image queries")
@@ -785,17 +744,11 @@ def main() -> None:
                         help="exit after the video ends instead of looping")
     parser.add_argument("--no-detect", action="store_true",
                         help="disable YOLOE 2D detection + ObjectDB tracking (on by default)")
-    parser.add_argument("--save-map", type=Path, default=None,
-                        help="On exit, save the voxel map + tracked objects to this .pkl bundle. "
-                             "Pair with --load-map to resume a previous capture")
-    parser.add_argument("--load-map", type=Path, default=None,
-                        help="Load a previously-saved .pkl map bundle before starting. "
-                             "Note: the loaded map is in the prior session's world frame, so "
-                             "it only aligns when the new VO session starts at the same physical "
-                             "pose (e.g., re-running the same clip from the start)")
-    parser.add_argument("--save-map-every-n", type=int, default=0,
-                        help="If >0 and --save-map is set, also write the bundle every N frames "
-                             "in addition to on-exit. Useful for crash safety on long sessions")
+
+    # xr_nav path must be on sys.path before importing cli_args (matches lines above).
+    from xr_nav.cli_args import add_map_io_args, add_keyframe_args
+    add_map_io_args(parser)
+    add_keyframe_args(parser)
 
     perf = parser.add_argument_group("latency tunables")
     perf.add_argument("--objects-process-every-n", type=int, default=OBJECTS_PROCESS_EVERY_N)
@@ -810,10 +763,16 @@ def main() -> None:
     nz.add_argument("--voxel-min-observations", type=int, default=VOXEL_MIN_OBSERVATIONS)
     nz.add_argument("--voxel-max-drift", type=float, default=VOXEL_INSERT_MAX_DRIFT_M)
     nz.add_argument("--use-depth-confidence", action="store_true")
-    nz.add_argument("--da3-conf-threshold", type=float, default=0.0,
+    nz.add_argument("--da3-conf-threshold", type=float, default=None,
                     help="DA3-only: zero out pixels with conf < this. "
-                         "0.0 disables (use all DA3 output). Raise to filter low-confidence "
-                         "regions; check the '[depth] DA3 conf range=...' print to pick a value")
+                         "Default 0.0 for relative variants (use all DA3 output); "
+                         "default 0.5 for da3metric-* variants where the conf channel is calibrated. "
+                         "Raise to filter low-confidence regions; check the "
+                         "'[depth] DA3 conf range=...' print to pick a value")
+    nz.add_argument("--da3-process-res", type=int, default=None,
+                    help="DA3-only: input resolution fed to the model. "
+                         "Default 504 for small/base/large; 700 for da3metric-* and da3nested-* "
+                         "(large variants benefit from higher input res on Reachy-sized scenes)")
     nz.add_argument("--da3-trust-is-metric", action="store_true",
                     help="DA3-only: trust the model's is_metric flag and use raw output when it's set. "
                          "By default we ignore the flag and always run normalize+scale-fit, which is "
@@ -846,6 +805,9 @@ def main() -> None:
     from dimos_lcm.foxglove_msgs.SceneUpdate import SceneUpdate
     from dimos_lcm.tf2_msgs.TFMessage import TFMessage
     from xr_nav.voxel_map import VoxelMap, RaycastConfig
+    from xr_nav.map_io import MapArtifactWriter, NullObjectDB, load_map_bundle
+    from xr_nav.keyframe_recorder import KeyframeRecorder
+    from xr_nav.cli_args import resolve_cloud_min_observations
 
     source = VideoSource(video_path=args.video, fps_cap=args.max_fps,
                          loop=not args.no_loop)
@@ -863,10 +825,29 @@ def main() -> None:
                   [0, 0, 1.0]], dtype=np.float64)
     print(f"[main] color {W}x{H} -> resampled {DW}x{DH}  HFOV={args.hfov_deg}°  fx={fx:.1f}")
 
+    # da3metric-* and da3nested-*-large variants return true metric depth; trust
+    # their is_metric flag automatically. Other DA3 variants need the explicit
+    # --da3-trust-is-metric opt-in (default off, since is_metric is unreliable
+    # on those).
+    _model_is_metric = "metric" in args.da3_model
+    _force_relative = not (args.da3_trust_is_metric or _model_is_metric)
+    # Conf threshold default: metric models have a calibrated conf channel that
+    # is worth filtering on; relative models don't, so leave it open.
+    if args.da3_conf_threshold is None:
+        _da3_conf_threshold = 0.5 if _model_is_metric else 0.0
+    else:
+        _da3_conf_threshold = args.da3_conf_threshold
+    # Process-res default: large variants are visibly noisier at 504 on
+    # Reachy-sized scenes; bump to 700 for metric/nested-large.
+    if args.da3_process_res is None:
+        _da3_process_res = 700 if (_model_is_metric or "nested" in args.da3_model) else 504
+    else:
+        _da3_process_res = args.da3_process_res
     depth_estimator = make_depth_estimator(args.depth, device=args.device,
-                                           da3_conf_threshold=args.da3_conf_threshold,
-                                           da3_force_relative=not args.da3_trust_is_metric,
-                                           da3_model=args.da3_model)
+                                           da3_conf_threshold=_da3_conf_threshold,
+                                           da3_force_relative=_force_relative,
+                                           da3_model=args.da3_model,
+                                           da3_process_res=_da3_process_res)
 
     det2d = None
     object_db = None
@@ -899,9 +880,22 @@ def main() -> None:
             print("[load] WARNING: bundle contains objects but --no-detect was passed; "
                   "objects will not be loaded")
 
+    map_writer = MapArtifactWriter(
+        save_map=args.save_map,
+        save_ply=args.save_ply,
+        save_pcd=args.save_pcd,
+        save_cloud_with_map=args.save_cloud_with_map,
+        cloud_min_observations=resolve_cloud_min_observations(args),
+    )
+    keyframe_recorder = (
+        KeyframeRecorder(args.save_keyframes, rgb_format=args.keyframe_rgb_format)
+        if args.save_keyframes is not None else None
+    )
+
     spatial_mem = SpatialMemoryAdapter(db_path=args.clip_db) if args.enable_clip_memory else None
 
     vo = MonocularDepthVO(K=K) if args.pose == "vo" else None
+    _external_pose_warned = False
 
     img_topic = LCMTransport("/color_image", Image)
     ann_topic = LCMTransport("/annotations", ImageAnnotations)
@@ -919,6 +913,8 @@ def main() -> None:
     print("  Image panels: /color_image  /depth")
     if args.pose == "identity":
         print("  pose=identity — every frame fuses at the origin; map will collapse.")
+    elif args.pose == "external":
+        print("  pose=external — using SourceFrame.c2w supplied by the frame source.")
     print("Ctrl+C to exit.\n")
 
     n = 0
@@ -961,9 +957,25 @@ def main() -> None:
             if vo is not None:
                 gray = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY)
                 c2w = vo.update(gray, depth_m)
+            elif args.pose == "external":
+                ext = getattr(sf, "c2w", None)
+                if ext is None:
+                    if not _external_pose_warned:
+                        print("[main] --pose external but SourceFrame.c2w is None; "
+                              "falling back to identity for this frame (will warn once)")
+                        _external_pose_warned = True
+                    c2w = np.eye(4, dtype=np.float64)
+                else:
+                    c2w = np.asarray(ext, dtype=np.float64)
             else:
                 c2w = np.eye(4, dtype=np.float64)
             t_pose = time.perf_counter() - t_pose
+
+            if (keyframe_recorder is not None
+                    and n % max(1, args.save_keyframes_every_n) == 0):
+                keyframe_recorder.record(
+                    idx=n, rgb=small_rgb, pose_4x4=c2w, intrinsics=K, timestamp=ts,
+                )
 
             depth_msg = Image.from_numpy(depth_m, format=ImageFormat.DEPTH,
                                          frame_id="camera_optical", ts=ts)
@@ -1097,27 +1109,23 @@ def main() -> None:
                       f"d={drange} pts={len(cam_pts_s)} pos=({pos[0]:+.2f},{pos[1]:+.2f},{pos[2]:+.2f}) "
                       f"voxels={voxel_map.size}{det_info}")
 
-            if (args.save_map is not None and args.save_map_every_n > 0
+            if (map_writer.enabled and args.save_map_every_n > 0
                     and n > 0 and n % args.save_map_every_n == 0):
-                try:
-                    save_map_bundle(args.save_map, voxel_map,
-                                    object_db if object_db is not None else _NullObjectDB(),
-                                    extra={"frames": n})
-                except Exception as e:
-                    print(f"[save] periodic save failed: {e}")
+                map_writer.write(voxel_map,
+                                 object_db if object_db is not None else NullObjectDB(),
+                                 extra={"frames": n})
 
             time.sleep(max(0.0, period - (time.perf_counter() - t_start)))
 
     except KeyboardInterrupt:
         print(f"\nstopped after {n} frames.")
     finally:
-        if args.save_map is not None:
-            try:
-                save_map_bundle(args.save_map, voxel_map,
-                                object_db if object_db is not None else _NullObjectDB(),
-                                extra={"frames": n})
-            except Exception as e:
-                print(f"[save] final save failed: {e}")
+        if map_writer.enabled:
+            map_writer.write(voxel_map,
+                             object_db if object_db is not None else NullObjectDB(),
+                             extra={"frames": n})
+        if keyframe_recorder is not None:
+            keyframe_recorder.close()
         try:
             source.close()
         except Exception:

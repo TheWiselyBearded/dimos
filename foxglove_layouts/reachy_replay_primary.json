@@ -1,0 +1,66 @@
+{
+  "configById": {
+    "3D!main": {
+      "cameraState": {
+        "distance": 6,
+        "perspective": true,
+        "phi": 60,
+        "thetaOffset": 45,
+        "targetOffset": [0, 0, 0],
+        "target": [0, 0, 0],
+        "fovy": 45,
+        "near": 0.1,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "followTf": "world",
+      "scene": { "ignoreColladaUpAxis": false, "transforms": { "axisScale": 0.5, "lineWidth": 2 } },
+      "transforms": {},
+      "topics": {
+        "/map": { "visible": true, "pointSize": 2 },
+        "/points_frame": { "visible": true, "pointSize": 2 },
+        "/object_clouds": { "visible": true, "pointSize": 3 },
+        "/scene_update": { "visible": true },
+        "/tf": { "visible": true }
+      },
+      "layers": {}
+    },
+    "Image!color": {
+      "topic": "/color_image",
+      "cameraInfoTopic": "/camera_info",
+      "annotations": { "/annotations": { "visible": true } },
+      "transformMarkers": false,
+      "synchronize": false,
+      "smooth": false,
+      "rotation": 0,
+      "minValue": 0,
+      "maxValue": 1
+    },
+    "Image!depth": {
+      "topic": "/depth",
+      "cameraInfoTopic": "/depth_camera_info",
+      "transformMarkers": false,
+      "synchronize": false,
+      "smooth": true,
+      "rotation": 0,
+      "colorMode": "colormap",
+      "colorMap": "turbo",
+      "minValue": 0.2,
+      "maxValue": 5.0
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "first": "3D!main",
+    "second": {
+      "first": "Image!color",
+      "second": "Image!depth",
+      "direction": "column",
+      "splitPercentage": 50
+    },
+    "direction": "row",
+    "splitPercentage": 60
+  }
+}

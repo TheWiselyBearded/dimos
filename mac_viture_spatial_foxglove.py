@@ -449,7 +449,7 @@ class DA3Estimator(DepthEstimator):
     """
     name = "da3"
 
-    def __init__(self, model_name: str = "da3-small", device: str = "mps",
+    def __init__(self, model_name: str = "da3metric-large", device: str = "mps",
                  process_res: int = 504, conf_threshold: float = 0.5):
         from depth_anything_3.api import DepthAnything3
         print(f"[depth] loading {model_name} on {device}...")
@@ -520,11 +520,12 @@ class StereoEstimator(DepthEstimator):
         return depth_m, conf
 
 
-def make_depth_estimator(kind: str, fx: float, device: str = "mps") -> DepthEstimator:
+def make_depth_estimator(kind: str, fx: float, device: str = "mps",
+                         da3_model: str = "da3metric-large") -> DepthEstimator:
     if kind == "depthpro":
         return DepthProEstimator(device=device)
     if kind == "da3":
-        return DA3Estimator(device=device)
+        return DA3Estimator(model_name=da3_model, device=device)
     if kind == "stereo":
         return StereoEstimator(fx=fx)
     raise ValueError(f"unknown depth kind: {kind}")
@@ -760,6 +761,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", choices=["recording", "live"], default="recording")
     parser.add_argument("--depth", choices=["depthpro", "da3", "stereo"], default="depthpro")
+    parser.add_argument("--da3-model", default="da3metric-large",
+                        choices=["da3-small", "da3-base", "da3-large",
+                                 "da3-giant", "da3metric-large",
+                                 "da3nested-giant-large"],
+                        help="DA3 variant when --depth da3. Default da3metric-large "
+                             "returns true metric depth (consistent across frames). "
+                             "Use da3-small/base/large for faster but scale-ambiguous depth.")
     parser.add_argument("--video", type=Path, default=DEFAULT_VIDEO, help="left undistorted .mp4 (recording mode)")
     parser.add_argument("--right-video", type=Path, default=DEFAULT_RIGHT_VIDEO, help="right .mp4 for --depth stereo")
     parser.add_argument("--recording-dir", type=Path, default=DEFAULT_RECORDING_DIR)
@@ -806,6 +814,10 @@ def main() -> None:
     nz.add_argument("--use-depth-confidence", action="store_true",
                     help="weight VoxelMap inserts by 1/depth^2 — down-weights noisy far points")
 
+    from xr_nav.cli_args import add_map_io_args, add_keyframe_args
+    add_map_io_args(parser)
+    add_keyframe_args(parser)
+
     args = parser.parse_args()
 
     # ---- LCM transports & dimos message types ----
@@ -818,6 +830,9 @@ def main() -> None:
     from dimos_lcm.foxglove_msgs.SceneUpdate import SceneUpdate
     from dimos_lcm.tf2_msgs.TFMessage import TFMessage
     from xr_nav.voxel_map import VoxelMap, RaycastConfig
+    from xr_nav.map_io import MapArtifactWriter, load_map_bundle
+    from xr_nav.keyframe_recorder import KeyframeRecorder
+    from xr_nav.cli_args import resolve_cloud_min_observations
 
     # ---- Source ----
     if args.source == "recording":
@@ -841,10 +856,14 @@ def main() -> None:
     DH = int(H * scale)
     cam_info = make_camera_info(DW, DH, args.hfov_deg)
     fx = cam_info.K[0]
+    K = np.array([[fx, 0, DW / 2.0],
+                  [0, fx, DH / 2.0],
+                  [0, 0, 1.0]], dtype=np.float64)
     print(f"[main] color {W}x{H} -> resampled {DW}x{DH}  HFOV={args.hfov_deg}°  fx={fx:.1f}")
 
     # ---- Depth ----
-    depth_estimator = make_depth_estimator(args.depth, fx=fx, device=args.device)
+    depth_estimator = make_depth_estimator(args.depth, fx=fx, device=args.device,
+                                           da3_model=args.da3_model)
 
     # ---- Detection ----
     print("[main] warming YOLOE detector (may download weights on first run)...")
@@ -858,6 +877,23 @@ def main() -> None:
     voxel_map = VoxelMap(voxel_size=args.voxel_size, max_range=VOXEL_MAX_RANGE_M)
     raycast_cfg = RaycastConfig(
         subsample=VOXEL_RAYCAST_SUBSAMPLE, max_misses=VOXEL_RAYCAST_MAX_MISSES)
+
+    if args.load_map is not None:
+        bundle = load_map_bundle(args.load_map)
+        voxel_map.load_state(bundle["voxel_map"])
+        object_db.load_state(bundle["object_db"])
+
+    map_writer = MapArtifactWriter(
+        save_map=args.save_map,
+        save_ply=args.save_ply,
+        save_pcd=args.save_pcd,
+        save_cloud_with_map=args.save_cloud_with_map,
+        cloud_min_observations=resolve_cloud_min_observations(args),
+    )
+    keyframe_recorder = (
+        KeyframeRecorder(args.save_keyframes, rgb_format=args.keyframe_rgb_format)
+        if args.save_keyframes is not None else None
+    )
 
     # ---- Optional CLIP SpatialMemory ----
     spatial_mem: SpatialMemoryAdapter | None = None
@@ -927,6 +963,12 @@ def main() -> None:
             # ---- Pose: ARKit -> OpenCV optical ----
             c2w_arkit = sf.c2w_arkit if sf.c2w_arkit is not None else np.eye(4)
             c2w = arkit_c2w_to_opencv(c2w_arkit)
+
+            if (keyframe_recorder is not None
+                    and n % max(1, args.save_keyframes_every_n) == 0):
+                keyframe_recorder.record(
+                    idx=n, rgb=small_rgb, pose_4x4=c2w, intrinsics=K, timestamp=ts,
+                )
 
             # ---- Build per-frame colored cloud, push into VoxelMap ----
             depth_msg = Image.from_numpy(depth_m, format=ImageFormat.DEPTH,
@@ -1046,11 +1088,19 @@ def main() -> None:
                       f"objs(perm/pend)={stats['permanent_count']}/{stats['pending_count']} "
                       f"2d={len(dets2d.detections)} [{names}]")
 
+            if (map_writer.enabled and args.save_map_every_n > 0
+                    and n > 0 and n % args.save_map_every_n == 0):
+                map_writer.write(voxel_map, object_db, extra={"frames": n})
+
             time.sleep(max(0.0, period - (time.perf_counter() - t_start)))
 
     except KeyboardInterrupt:
         print(f"\nstopped after {n} frames.")
     finally:
+        if map_writer.enabled:
+            map_writer.write(voxel_map, object_db, extra={"frames": n})
+        if keyframe_recorder is not None:
+            keyframe_recorder.close()
         try:
             source.close()
         except Exception:

@@ -1,0 +1,4 @@
+[submodule "xr-nav"]
+	path = xr-nav
+	url = https://github.com/TheWiselyBearded/xr-nav.git
+	branch = feat/histogram-plane-detector
