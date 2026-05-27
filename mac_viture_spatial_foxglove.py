@@ -52,7 +52,10 @@ DEFAULT_RECORDING_DIR = Path(
 )
 
 sys.path.insert(0, str(REPO / "xr-nav" / "src"))
-sys.path.insert(0, str(REPO / "xr-nav" / "awesome-depth-anything-3" / "src"))
+# DA3 source: macOS uses the awesome-depth-anything-3 fork;
+# Linux/Windows use the official ByteDance Depth-Anything-3.
+_da3_dir = "awesome-depth-anything-3" if sys.platform == "darwin" else "Depth-Anything-3"
+sys.path.insert(0, str(REPO / "xr-nav" / _da3_dir / "src"))
 
 # -------- Defaults (most are exposed as CLI flags below) --------
 HFOV_DEG = 46.0
@@ -453,7 +456,17 @@ class DA3Estimator(DepthEstimator):
                  process_res: int = 504, conf_threshold: float = 0.5):
         from depth_anything_3.api import DepthAnything3
         print(f"[depth] loading {model_name} on {device}...")
-        self._model = DepthAnything3(model_name=model_name, device=device)
+        if sys.platform == "darwin":
+            # macOS: the awesome-depth-anything-3 fork loads weights in its constructor.
+            self._model = DepthAnything3(model_name=model_name, device=device)
+            self._metric_model = False
+        else:
+            # Linux/Windows official ByteDance repo: the constructor only builds the
+            # architecture -- weights must be loaded via from_pretrained, then moved to device.
+            self._model = DepthAnything3.from_pretrained(
+                f"depth-anything/{model_name.upper()}").to(device)
+            # Official Prediction.is_metric is unreliable; trust the model name.
+            self._metric_model = "metric" in model_name.lower()
         self._res = process_res
         self._conf_thresh = conf_threshold
         self._scale: float | None = None
@@ -462,7 +475,7 @@ class DA3Estimator(DepthEstimator):
         pred = self._model.inference(image=[color_rgb], process_res=self._res)
         raw = np.nan_to_num(pred.depth[0].astype(np.float32),
                             nan=0.0, posinf=0.0, neginf=0.0)
-        is_metric = bool(getattr(pred, "is_metric", 0))
+        is_metric = self._metric_model or bool(getattr(pred, "is_metric", 0))
         if is_metric:
             depth_m = raw
         else:
