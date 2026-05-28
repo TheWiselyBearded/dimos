@@ -321,7 +321,13 @@ def main():
     print(f"loading DA3 model '{da3_model}' on {da3_device}...")
     from depth_anything_3.api import DepthAnything3
     t0 = time.monotonic()
-    da3 = DepthAnything3(model_name=da3_model, device=da3_device)
+    # Load pretrained weights via from_pretrained: the bare constructor only builds
+    # the architecture and leaves the net uninitialized, giving a flat near-constant
+    # depth that gets stretched into blocky garbage.
+    da3 = DepthAnything3.from_pretrained(
+        f"depth-anything/{da3_model.upper()}").to(da3_device)
+    # Prediction.is_metric is unreliable (returns {} -> falsy); trust the model name.
+    da3_is_metric = "metric" in da3_model.lower()
     print(f"  DA3 ready in {time.monotonic() - t0:.1f}s on {da3.device}")
 
     # ---- Detection (2D + 3D, like mac_unitree_replay_foxglove.py) ----
@@ -397,7 +403,7 @@ def main():
 
             raw_depth = np.nan_to_num(pred.depth[0].astype(np.float32),
                                       nan=0.0, posinf=0.0, neginf=0.0)
-            is_metric = bool(getattr(pred, "is_metric", 0))
+            is_metric = da3_is_metric or bool(getattr(pred, "is_metric", 0))
             depth_m = (raw_depth if is_metric
                        else normalize_depth(raw_depth, DEPTH_NEAR_M, DEPTH_FAR_M))
             # DA3 confidence: zero out low-confidence pixels so from_rgbd skips them

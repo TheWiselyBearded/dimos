@@ -456,17 +456,15 @@ class DA3Estimator(DepthEstimator):
                  process_res: int = 504, conf_threshold: float = 0.5):
         from depth_anything_3.api import DepthAnything3
         print(f"[depth] loading {model_name} on {device}...")
-        if sys.platform == "darwin":
-            # macOS: the awesome-depth-anything-3 fork loads weights in its constructor.
-            self._model = DepthAnything3(model_name=model_name, device=device)
-            self._metric_model = False
-        else:
-            # Linux/Windows official ByteDance repo: the constructor only builds the
-            # architecture -- weights must be loaded via from_pretrained, then moved to device.
-            self._model = DepthAnything3.from_pretrained(
-                f"depth-anything/{model_name.upper()}").to(device)
-            # Official Prediction.is_metric is unreliable; trust the model name.
-            self._metric_model = "metric" in model_name.lower()
+        # The DepthAnything3 constructor only builds the architecture; pretrained
+        # weights load via from_pretrained (PyTorchModelHubMixin). A bare constructor
+        # leaves the net uninitialized -- its near-constant output gets stretched into
+        # blocky garbage -- so on every platform (the macOS fork included) load weights
+        # via from_pretrained, then move to device.
+        self._model = DepthAnything3.from_pretrained(
+            f"depth-anything/{model_name.upper()}").to(device)
+        # Prediction.is_metric is unreliable (returns {} -> falsy); trust the model name.
+        self._metric_model = "metric" in model_name.lower()
         self._res = process_res
         self._conf_thresh = conf_threshold
         self._scale: float | None = None
