@@ -80,6 +80,19 @@ OBJECTS_SCENE_TTL_S = 3.0
 SPATIAL_MIN_DISTANCE_M = 0.10
 SPATIAL_MIN_INTERVAL_S = 1.0
 
+# Raw accumulated-cloud defaults. The voxel map (/map) carves + can be pruned;
+# this is a separate "retain everything ever seen" cloud (/accumulated_cloud)
+# deduped only enough to bound memory + keep the published message transmittable.
+ACCUMULATE_CLOUD_VOXEL_M = 0.02
+ACCUMULATE_CLOUD_MAX_POINTS = 1_200_000
+
+# Optional sink for the live object list. When set to a callable
+# ``sink(objects: list[dict], ts: float)`` the main loop pushes the tracked
+# objects (name, id, distance-from-camera, detection count, world position)
+# each publish cycle. Left None for standalone runs (no behaviour change); the
+# ReachyBrain server sets it to forward the list to the robot's web app.
+OBJECT_LIST_SINK = None
+
 
 # ===========================================================================
 #  Pose / TF helpers
@@ -731,6 +744,75 @@ class SpatialMemoryAdapter:
 
 
 # ===========================================================================
+#  Raw accumulated cloud (retain-everything scan)
+# ===========================================================================
+
+class AccumulatedCloud:
+    """Persistent world-frame point cloud that only grows.
+
+    Unlike the VoxelMap (which raycast-carves free space and can be distance-
+    pruned), this keeps every region the camera has ever seen — including
+    surfaces glimpsed only once. To bound memory and keep the published
+    PointCloud2 transmittable it voxel-downsamples on each consolidate and
+    random-subsamples as a hard backstop.
+    """
+
+    def __init__(self, voxel: float = ACCUMULATE_CLOUD_VOXEL_M,
+                 max_points: int = ACCUMULATE_CLOUD_MAX_POINTS) -> None:
+        self._pts = np.empty((0, 3), np.float32)
+        self._cols = np.empty((0, 3), np.float32)
+        self._pending_pts: list[np.ndarray] = []
+        self._pending_cols: list[np.ndarray] = []
+        self._voxel = float(voxel)
+        self._max_points = int(max_points)
+
+    def add(self, world_pts: np.ndarray, colors: np.ndarray | None = None) -> None:
+        if world_pts is None or len(world_pts) == 0:
+            return
+        wp = np.asarray(world_pts, np.float32)
+        if colors is not None and len(colors) == len(wp):
+            cc = np.asarray(colors, np.float32)
+        else:
+            cc = np.full((len(wp), 3), 0.6, np.float32)
+        self._pending_pts.append(wp)
+        self._pending_cols.append(cc)
+
+    def _consolidate(self) -> None:
+        if not self._pending_pts:
+            return
+        pts = np.vstack([self._pts, *self._pending_pts])
+        cols = np.vstack([self._cols, *self._pending_cols])
+        self._pending_pts.clear()
+        self._pending_cols.clear()
+        if self._voxel > 0 and len(pts):
+            import open3d as o3d
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+            pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
+            pcd = pcd.voxel_down_sample(self._voxel)
+            pts = np.asarray(pcd.points, np.float32)
+            cols = np.asarray(pcd.colors, np.float32)
+        if len(pts) > self._max_points:
+            idx = np.random.choice(len(pts), self._max_points, replace=False)
+            pts, cols = pts[idx], cols[idx]
+        self._pts, self._cols = pts, cols
+
+    @property
+    def size(self) -> int:
+        return len(self._pts) + sum(len(p) for p in self._pending_pts)
+
+    def to_msg(self, ts: float):
+        self._consolidate()
+        import open3d as o3d
+        from dimos.msgs.sensor_msgs import PointCloud2
+        pcd = o3d.geometry.PointCloud()
+        if len(self._pts):
+            pcd.points = o3d.utility.Vector3dVector(self._pts.astype(np.float64))
+            pcd.colors = o3d.utility.Vector3dVector(self._cols.astype(np.float64))
+        return PointCloud2(pointcloud=pcd, frame_id="world", ts=ts)
+
+
+# ===========================================================================
 #  Main loop
 # ===========================================================================
 
@@ -788,7 +870,24 @@ def main() -> None:
     nz.add_argument("--voxel-size", type=float, default=VOXEL_M)
     nz.add_argument("--voxel-min-observations", type=int, default=VOXEL_MIN_OBSERVATIONS)
     nz.add_argument("--voxel-max-drift", type=float, default=VOXEL_INSERT_MAX_DRIFT_M)
+    nz.add_argument("--no-prune", action="store_true",
+                    help="Don't distance-prune the voxel map each frame. For a "
+                         "fixed-base scanner (e.g. Reachy panning its head) the map "
+                         "should accumulate; pruning relative to a drifting VO position "
+                         "erases good geometry. Combine with --raycast-every-n 0 for a "
+                         "pure accumulate-only map.")
     nz.add_argument("--use-depth-confidence", action="store_true")
+    nz.add_argument("--accumulate-cloud", action="store_true",
+                    help="Publish a separate /accumulated_cloud that retains every "
+                         "region ever seen (not carved/pruned like /map). Deduped to "
+                         "--accumulate-cloud-voxel and capped at "
+                         "--accumulate-cloud-max-points to bound memory + transport.")
+    nz.add_argument("--accumulate-cloud-voxel", type=float, default=ACCUMULATE_CLOUD_VOXEL_M,
+                    help="Voxel size (m) the accumulated cloud is deduped to on each "
+                         "publish. Smaller = denser scan but larger messages.")
+    nz.add_argument("--accumulate-cloud-max-points", type=int, default=ACCUMULATE_CLOUD_MAX_POINTS,
+                    help="Hard cap on accumulated-cloud point count (random-subsampled "
+                         "above this) to keep the published PointCloud2 transmittable.")
     nz.add_argument("--da3-conf-threshold", type=float, default=None,
                     help="DA3-only: zero out pixels with conf < this. "
                          "Default 0.0 for relative variants (use all DA3 output); "
@@ -904,6 +1003,9 @@ def main() -> None:
     voxel_map = VoxelMap(voxel_size=args.voxel_size, max_range=VOXEL_MAX_RANGE_M)
     raycast_cfg = RaycastConfig(
         subsample=VOXEL_RAYCAST_SUBSAMPLE, max_misses=VOXEL_RAYCAST_MAX_MISSES)
+    acc_cloud = (AccumulatedCloud(voxel=args.accumulate_cloud_voxel,
+                                  max_points=args.accumulate_cloud_max_points)
+                 if args.accumulate_cloud else None)
 
     if args.load_map is not None:
         bundle = load_map_bundle(args.load_map)
@@ -938,12 +1040,18 @@ def main() -> None:
     depth_topic = LCMTransport("/depth", Image)
     points_topic = LCMTransport("/points_frame", PointCloud2)
     map_topic = LCMTransport("/map", PointCloud2)
+    acc_cloud_topic = LCMTransport("/accumulated_cloud", PointCloud2) if args.accumulate_cloud else None
     obj_cloud_topic = LCMTransport("/object_clouds", PointCloud2)
     scene_topic = LCMTransport("/scene_update", SceneUpdate)
     tf_topic = LCMTransport("/tf", TFMessage)
 
     print("\n[main] publishing. Foxglove: ws://localhost:8765")
     print("  3D panel (frame=world): /map  /object_clouds  /scene_update  /tf  /points_frame")
+    if acc_cloud_topic is not None:
+        print("  accumulate-cloud ON: /accumulated_cloud "
+              f"(voxel={args.accumulate_cloud_voxel}m cap={args.accumulate_cloud_max_points})")
+    if args.no_prune:
+        print("  no-prune ON: voxel map accumulates (not distance-pruned)")
     print("  Image panels: /color_image  /depth")
     if args.pose == "identity":
         print("  pose=identity — every frame fuses at the origin; map will collapse.")
@@ -1041,7 +1149,10 @@ def main() -> None:
                                  max_drift=args.voxel_max_drift, colors=cam_cols_s)
                 if args.raycast_every_n > 0 and (n % args.raycast_every_n == 0):
                     voxel_map.raycast_clear(origin=c2w[:3, 3], points=world_pts, config=raycast_cfg)
-                voxel_map.prune(float(c2w[0, 3]), float(c2w[1, 3]), float(c2w[2, 3]))
+                if not args.no_prune:
+                    voxel_map.prune(float(c2w[0, 3]), float(c2w[1, 3]), float(c2w[2, 3]))
+                if acc_cloud is not None:
+                    acc_cloud.add(world_pts, cam_cols_s)
 
                 import open3d as o3d
                 pf = o3d.geometry.PointCloud()
@@ -1112,6 +1223,8 @@ def main() -> None:
                     mp.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
                     mp.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
                     map_topic.publish(PointCloud2(pointcloud=mp, frame_id="world", ts=ts))
+                if acc_cloud_topic is not None and acc_cloud is not None:
+                    acc_cloud_topic.publish(acc_cloud.to_msg(ts))
 
             if object_db is not None and n % OBJECTS_PUBLISH_EVERY_N == 0:
                 from dimos.perception.detection.type.detection3d.object import aggregate_pointclouds
@@ -1119,6 +1232,28 @@ def main() -> None:
                 if all_objs:
                     obj_cloud_topic.publish(aggregate_pointclouds(all_objs))
                     scene_topic.publish(build_scene_update_for_objects(all_objs, ts))
+                if OBJECT_LIST_SINK is not None:
+                    cam_pos = c2w[:3, 3].astype(np.float64)
+                    listing = []
+                    for obj in all_objs:
+                        ctr = obj.center
+                        cxyz = np.array([ctr.x, ctr.y, ctr.z], dtype=np.float64)
+                        dist = float(np.linalg.norm(cxyz - cam_pos))
+                        listing.append({
+                            "id": obj.object_id,
+                            "name": obj.name,
+                            "distance_m": round(dist, 2),
+                            "detections": int(obj.detections_count),
+                            "x": round(float(ctr.x), 3),
+                            "y": round(float(ctr.y), 3),
+                            "z": round(float(ctr.z), 3),
+                        })
+                    listing.sort(key=lambda o: o["distance_m"])
+                    try:
+                        OBJECT_LIST_SINK(listing, ts)
+                    except Exception as e:  # noqa: BLE001 — never let the sink kill the pipeline
+                        if n < 3:
+                            print(f"  OBJECT_LIST_SINK failed: {e}")
 
             n += 1
             if n == 1 or n % max(1, int(args.max_fps)) == 0:
@@ -1140,10 +1275,11 @@ def main() -> None:
                                 f"/{add_stats.get('matched_distance', 0)}"
                                 f"/{add_stats.get('matched_pixel', 0)}"
                                 f" decayed={len(decay_deleted)}")
+                acc_info = f" acc={acc_cloud.size}" if acc_cloud is not None else ""
                 print(f"  f{n} (src#{sf.frame_idx}): "
                       f"depth={t_depth*1000:.0f}ms pose={t_pose*1000:.0f}ms total={elapsed*1000:.0f}ms "
                       f"d={drange} pts={len(cam_pts_s)} pos=({pos[0]:+.2f},{pos[1]:+.2f},{pos[2]:+.2f}) "
-                      f"voxels={voxel_map.size}{det_info}")
+                      f"voxels={voxel_map.size}{acc_info}{det_info}")
 
             if (map_writer.enabled and args.save_map_every_n > 0
                     and n > 0 and n % args.save_map_every_n == 0):
@@ -1172,8 +1308,10 @@ def main() -> None:
             except Exception:
                 pass
         for t in (img_topic, ann_topic, cam_info_topic, depth_cam_info_topic,
-                  depth_topic, points_topic, map_topic, obj_cloud_topic,
-                  scene_topic, tf_topic):
+                  depth_topic, points_topic, map_topic, acc_cloud_topic,
+                  obj_cloud_topic, scene_topic, tf_topic):
+            if t is None:
+                continue
             try:
                 t.lcm.stop()
             except Exception:
