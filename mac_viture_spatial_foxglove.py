@@ -93,6 +93,14 @@ MAP_PUBLISH_EVERY_N = 5
 OBJECTS_DIST_THRESHOLD_M = 0.4
 OBJECTS_MIN_DETECTIONS = 2
 OBJECTS_PUBLISH_EVERY_N = 1
+# Scene entity lifetime (s). Must exceed the publish interval so live boxes stay
+# solid, but be finite so decayed/removed objects expire from Foxglove instead of
+# lingering forever (sec=0 = permanent).
+OBJECTS_SCENE_TTL_S = 3.0
+# Keep only the nearest depth band (m) within each segmentation mask, so mask
+# spill onto far background doesn't leak into the object cloud and inflate its
+# box. Raise for large/deep furniture; lower to crop tighter. 0 disables.
+OBJECTS_FG_BAND_M = 0.8
 # Skip the per-detection RGBD reprojection every N frames. ObjectDB still keeps
 # the previous detections; it just doesn't get fresh ones every frame. Cheap
 # way to reclaim ~50-200ms when many objects are visible.
@@ -632,12 +640,19 @@ def build_scene_update_for_objects(objects: list[Any], ts: float):
     entities: list[Any] = []
 
     for obj in objects:
+        # Robust box: a raw min/max AABB is dominated by a handful of smeared/leaked
+        # points (depth noise along the view ray), which balloons the box. Use a
+        # 2-98th percentile extent so a few strays don't inflate it.
         try:
-            aabb = obj.pointcloud.axis_aligned_bounding_box
+            pts, _ = obj.pointcloud.as_numpy()
         except Exception:
             continue
-        center = aabb.get_center()
-        extent = aabb.get_extent()
+        if pts is None or len(pts) < 10:
+            continue
+        lo = np.percentile(pts, 2.0, axis=0)
+        hi = np.percentile(pts, 98.0, axis=0)
+        center = (lo + hi) / 2.0
+        extent = np.maximum(hi - lo, 1e-3)
         if not np.all(np.isfinite(center)) or not np.all(np.isfinite(extent)):
             continue
 
@@ -685,8 +700,8 @@ def build_scene_update_for_objects(objects: list[Any], ts: float):
         entity.frame_id = "world"
         entity.id = obj.object_id
         entity.lifetime = Duration()
-        entity.lifetime.sec = 0
-        entity.lifetime.nanosec = 0
+        entity.lifetime.sec = int(OBJECTS_SCENE_TTL_S)
+        entity.lifetime.nanosec = int((OBJECTS_SCENE_TTL_S % 1.0) * 1e9)
         entity.frame_locked = False
         entity.metadata_length = 0; entity.metadata = []
         entity.arrows_length = 0; entity.arrows = []
@@ -882,7 +897,15 @@ def main() -> None:
     object_db = ObjectDB(
         distance_threshold=OBJECTS_DIST_THRESHOLD_M,
         min_detections_for_permanent=OBJECTS_MIN_DETECTIONS,
+        # YOLOE prompt-free emits flickering vocab names ("..._1281_3" vs "..._1281_1")
+        # for the same physical object, so exact-name gating blocks every merge and
+        # every frame spawns a new "(1)" object. Match on spatial proximity alone.
+        class_aware_matching=False,
     )
+    print(f"\n[objdb] === MERGE FIXES ACTIVE === class_aware=False "
+          f"dist_thresh={OBJECTS_DIST_THRESHOLD_M}m fg_band={OBJECTS_FG_BAND_M}m "
+          f"scene_ttl={OBJECTS_SCENE_TTL_S}s\n"
+          f"[objdb] if you don't see this line, you're running stale code — kill & relaunch\n")
 
     # ---- Voxel map (replaces MapAccumulator) ----
     voxel_map = VoxelMap(voxel_size=args.voxel_size, max_range=VOXEL_MAX_RANGE_M)
@@ -1039,19 +1062,29 @@ def main() -> None:
             new_objects: list[Any] = []
             run_objects = (args.objects_process_every_n > 0
                            and n % args.objects_process_every_n == 0)
-            if run_objects and len(dets2d.detections) > 0:
+            if run_objects:
                 camera_tf = make_camera_to_world_transform(c2w, ts)
-                try:
-                    new_objects = Object.from_2d_to_list(
-                        detections_2d=dets2d, color_image=color_rgb_msg, depth_image=depth_msg,
-                        camera_info=cam_info, camera_transform=camera_tf,
-                        depth_scale=1.0, depth_trunc=DEPTH_FAR_M,
-                    )
-                except Exception as e:
-                    if n < 3:
-                        print(f"  Object.from_2d_to_list failed: {e}")
-                if new_objects:
-                    object_db.add_objects(new_objects)
+                if len(dets2d.detections) > 0:
+                    try:
+                        new_objects = Object.from_2d_to_list(
+                            detections_2d=dets2d, color_image=color_rgb_msg, depth_image=depth_msg,
+                            camera_info=cam_info, camera_transform=camera_tf,
+                            depth_scale=1.0, depth_trunc=DEPTH_FAR_M,
+                            depth_fg_band_m=OBJECTS_FG_BAND_M,
+                        )
+                    except Exception as e:
+                        if n < 3:
+                            print(f"  Object.from_2d_to_list failed: {e}")
+                # Pass camera context so the DB's pixel-reprojection fallback can
+                # re-associate objects whose metric depth jitters past the distance
+                # threshold between frames (the cause of stacked distant-object boxes).
+                updated = object_db.add_objects(
+                    new_objects, c2w=c2w, K=K, image_width=DW, image_height=DH)
+                # Decay objects that are in-frustum but went unobserved this frame so
+                # stale duplicates fade out instead of accumulating forever.
+                observed_ids = {o.object_id for o in updated}
+                object_db.decay_unobserved(
+                    observed_ids, c2w=c2w, K=K, image_width=DW, image_height=DH)
 
             # ---- Optional CLIP SpatialMemory ----
             if spatial_mem is not None:
@@ -1093,11 +1126,16 @@ def main() -> None:
                 d_pos = depth_m[depth_m > 0]
                 drange = f"[{d_pos.min():.2f},{d_pos.max():.2f}]m" if d_pos.size else "[empty]"
                 elapsed = time.perf_counter() - t_start
+                add = object_db.get_last_add_stats()
+                merged = add.get("matched_track", 0) + add.get("matched_distance", 0) + add.get("matched_pixel", 0)
                 print(f"  f{n} (src#{sf.frame_idx}): "
                       f"depth={t_depth*1000:.0f}ms total={elapsed*1000:.0f}ms "
                       f"d={drange} voxels={voxel_map.size} "
                       f"objs(perm/pend)={stats['permanent_count']}/{stats['pending_count']} "
-                      f"2d={len(dets2d.detections)} [{names}]")
+                      f"2d={len(dets2d.detections)} [{names}] "
+                      f"| add: created={add.get('created',0)} merged={merged} "
+                      f"(trk={add.get('matched_track',0)} dist={add.get('matched_distance',0)} "
+                      f"px={add.get('matched_pixel',0)})")
 
             if (map_writer.enabled and args.save_map_every_n > 0
                     and n > 0 and n % args.save_map_every_n == 0):

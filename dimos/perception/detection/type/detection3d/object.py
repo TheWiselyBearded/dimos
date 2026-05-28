@@ -64,15 +64,20 @@ class Object(Detection3D):
         Args:
             other: Another Object instance with newer detection data.
         """
-        # Accumulate pointclouds if transforms are available
+        # Accumulate pointclouds if transforms are available. Both clouds are
+        # already expressed in the world frame (from_2d_to_list applied the camera
+        # transform), so we union them directly and voxel-downsample to bound size.
+        # Accumulating (rather than replacing) keeps the saved bounds stable and
+        # lets them refine across observations instead of being overwritten by a
+        # single noisy frame's cloud.
         if other.camera_transform is not None:
-            # Transform new pointcloud to world frame and add to existing
-            # transformed_pc = other.pointcloud.transform(other.camera_transform)
-            # self.pointcloud = self.pointcloud + transformed_pc
-
-            # Recompute center from accumulated pointcloud
-            self.pointcloud = other.pointcloud
-            pc_center = other.pointcloud.center
+            merged = self.pointcloud + other.pointcloud
+            try:
+                merged = merged.voxel_downsample(0.02)
+            except Exception:
+                pass
+            self.pointcloud = merged
+            pc_center = self.pointcloud.center
             self.center = Vector3(pc_center.x, pc_center.y, pc_center.z)
         else:
             # No transform available, just replace
@@ -155,6 +160,7 @@ class Object(Detection3D):
         statistical_std_ratio: float = 0.5,
         voxel_downsample: float = 0.005,
         mask_erode_pixels: int = 3,
+        depth_fg_band_m: float = 0.0,
     ) -> list[Object]:
         """Create 3D Objects from 2D detections and RGBD images.
 
@@ -174,6 +180,11 @@ class Object(Detection3D):
             voxel_downsample: Voxel size (meters) for downsampling before filtering. Set <= 0 to skip.
             mask_erode_pixels: Number of pixels to erode the mask by to remove
                               noisy depth edge points. Set to 0 to disable.
+            depth_fg_band_m: Keep only the nearest depth band within each mask,
+                              dropping pixels more than this many meters behind the
+                              nearest robust surface. Removes background that leaks
+                              through imperfect masks (which would inflate the 3D
+                              box). Set to 0 to disable.
 
         Returns:
             List of Object instances with pointclouds
@@ -216,6 +227,18 @@ class Object(Detection3D):
 
             depth_masked = depth_cv.copy()
             depth_masked[mask == 0] = 0
+
+            # A 2D segmentation mask routinely spills past the object onto
+            # background sitting far behind it (e.g. wall seen through a ceiling-fan
+            # gap). Those leaked pixels would inflate the object's 3D box, and a
+            # statistical outlier filter won't remove a coherent background slab.
+            # Keep only the nearest depth band: drop anything more than
+            # depth_fg_band_m behind the nearest robust (5th-percentile) surface.
+            if depth_fg_band_m > 0:
+                inside = depth_masked > 0
+                if int(inside.sum()) >= 10:
+                    near = float(np.percentile(depth_masked[inside], 5.0))
+                    depth_masked[depth_masked > near + depth_fg_band_m] = 0
 
             rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
                 o3d.geometry.Image(color_cv.astype(np.uint8)),

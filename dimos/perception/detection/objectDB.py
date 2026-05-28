@@ -434,7 +434,7 @@ class ObjectDB:
         ``distance_threshold`` but the object is visually still in the same place.
         """
         try:
-            new_cx, new_cy = obj.center_bbox()
+            new_cx, new_cy = obj.center_bbox
         except Exception:
             return None
 

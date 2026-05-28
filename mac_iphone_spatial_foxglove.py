@@ -70,6 +70,12 @@ OBJECTS_DIST_THRESHOLD_M = 0.4
 OBJECTS_MIN_DETECTIONS = 2
 OBJECTS_PUBLISH_EVERY_N = 1
 OBJECTS_PROCESS_EVERY_N = 1
+# Keep only the nearest depth band (m) within each segmentation mask so mask spill
+# onto far background doesn't leak into the object cloud and inflate its box.
+OBJECTS_FG_BAND_M = 0.8
+# Scene entity lifetime (s): finite so decayed/removed objects expire from Foxglove
+# instead of lingering forever (sec=0 = permanent), but > the publish interval.
+OBJECTS_SCENE_TTL_S = 3.0
 
 SPATIAL_MIN_DISTANCE_M = 0.10
 SPATIAL_MIN_INTERVAL_S = 1.0
@@ -601,12 +607,19 @@ def build_scene_update_for_objects(objects: list[Any], ts: float):
     entities: list[Any] = []
 
     for obj in objects:
+        # Robust box: a raw min/max AABB is dominated by a handful of smeared/leaked
+        # points (depth noise along the view ray), which balloons the box toward the
+        # camera. Use a 2-98th percentile extent so a few strays don't inflate it.
         try:
-            aabb = obj.pointcloud.axis_aligned_bounding_box
+            pts, _ = obj.pointcloud.as_numpy()
         except Exception:
             continue
-        center = aabb.get_center()
-        extent = aabb.get_extent()
+        if pts is None or len(pts) < 10:
+            continue
+        lo = np.percentile(pts, 2.0, axis=0)
+        hi = np.percentile(pts, 98.0, axis=0)
+        center = (lo + hi) / 2.0
+        extent = np.maximum(hi - lo, 1e-3)
         if not np.all(np.isfinite(center)) or not np.all(np.isfinite(extent)):
             continue
 
@@ -640,7 +653,9 @@ def build_scene_update_for_objects(objects: list[Any], ts: float):
         entity = SceneEntity()
         entity.timestamp = to_ros_stamp(ts)
         entity.frame_id = "world"; entity.id = obj.object_id
-        entity.lifetime = Duration(); entity.lifetime.sec = 0; entity.lifetime.nanosec = 0
+        entity.lifetime = Duration()
+        entity.lifetime.sec = int(OBJECTS_SCENE_TTL_S)
+        entity.lifetime.nanosec = int((OBJECTS_SCENE_TTL_S % 1.0) * 1e9)
         entity.frame_locked = False
         entity.metadata_length = 0; entity.metadata = []
         entity.arrows_length = 0; entity.arrows = []
@@ -792,8 +807,11 @@ def main() -> None:
     odb = parser.add_argument_group("object tracking (ObjectDB)")
     odb.add_argument("--objects-distance-threshold", type=float, default=OBJECTS_DIST_THRESHOLD_M,
                      help="3D center distance (m) below which two detections merge")
-    odb.add_argument("--objects-disable-class-aware", action="store_true",
-                     help="merge detections regardless of class name (default: name must match)")
+    odb.add_argument("--objects-class-aware", action="store_true",
+                     help="require matching class name to merge. Default OFF: YOLOE prompt-free "
+                          "emits flickering vocab names for the same object, so name-gating blocks "
+                          "every merge and each frame spawns a new '(1)' box. Default merges on "
+                          "spatial proximity alone")
     odb.add_argument("--objects-pixel-threshold", type=float, default=60.0,
                      help="2D-pixel fallback radius. After 3D match fails, project the existing "
                           "object's center into the current image; merge if a same-class new "
@@ -870,13 +888,18 @@ def main() -> None:
         object_db = ObjectDB(
             distance_threshold=args.objects_distance_threshold,
             min_detections_for_permanent=OBJECTS_MIN_DETECTIONS,
-            class_aware_matching=not args.objects_disable_class_aware,
+            class_aware_matching=args.objects_class_aware,
             frustum_match_pixel_threshold=args.objects_pixel_threshold,
             enable_decay=not args.objects_disable_decay,
             confidence_init=args.objects_confidence_init,
             confidence_step_up=args.objects_confidence_up,
             confidence_step_down=args.objects_confidence_down,
         )
+        print(f"\n[objdb] === MERGE FIXES ACTIVE === class_aware={args.objects_class_aware} "
+              f"dist_thresh={args.objects_distance_threshold}m px_thresh={args.objects_pixel_threshold} "
+              f"fg_band={OBJECTS_FG_BAND_M}m scene_ttl={OBJECTS_SCENE_TTL_S}s\n"
+              f"[objdb] if you DON'T see this line on startup, you're running stale code "
+              f"— kill the process and relaunch\n")
 
     voxel_map = VoxelMap(voxel_size=args.voxel_size, max_range=VOXEL_MAX_RANGE_M)
     raycast_cfg = RaycastConfig(
@@ -1047,6 +1070,7 @@ def main() -> None:
                                 detections_2d=dets2d, color_image=color_rgb_msg, depth_image=depth_msg,
                                 camera_info=cam_info, camera_transform=camera_tf,
                                 depth_scale=1.0, depth_trunc=DEPTH_FAR_M,
+                                depth_fg_band_m=OBJECTS_FG_BAND_M,
                             )
                         except Exception as e:
                             if n < 3:
@@ -1111,6 +1135,7 @@ def main() -> None:
                     add_stats = object_db.get_last_add_stats() or {}
                     det_info = (f" objs(perm/pend)={stats['permanent_count']}/{stats['pending_count']}"
                                 f" 2d={len(dets2d.detections)} [{names}]"
+                                f" created={add_stats.get('created', 0)}"
                                 f" match(t/d/p)={add_stats.get('matched_track', 0)}"
                                 f"/{add_stats.get('matched_distance', 0)}"
                                 f"/{add_stats.get('matched_pixel', 0)}"
