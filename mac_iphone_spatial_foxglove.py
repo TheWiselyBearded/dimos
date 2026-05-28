@@ -1032,6 +1032,7 @@ def main() -> None:
 
     vo = MonocularDepthVO(K=K) if args.pose == "vo" else None
     _external_pose_warned = False
+    _last_external_c2w: np.ndarray | None = None
 
     img_topic = LCMTransport("/color_image", Image)
     ann_topic = LCMTransport("/annotations", ImageAnnotations)
@@ -1101,14 +1102,20 @@ def main() -> None:
                 c2w = vo.update(gray, depth_m)
             elif args.pose == "external":
                 ext = getattr(sf, "c2w", None)
-                if ext is None:
+                if ext is not None:
+                    c2w = np.asarray(ext, dtype=np.float64)
+                    _last_external_c2w = c2w
+                elif _last_external_c2w is not None:
+                    # Brief pose dropout — hold the last known pose instead of
+                    # snapping to the origin, which would dump this frame's points
+                    # into the map at the wrong place and smear it.
+                    c2w = _last_external_c2w
+                else:
                     if not _external_pose_warned:
-                        print("[main] --pose external but SourceFrame.c2w is None; "
-                              "falling back to identity for this frame (will warn once)")
+                        print("[main] --pose external but no pose received yet; "
+                              "using identity until the first pose arrives (warn once)")
                         _external_pose_warned = True
                     c2w = np.eye(4, dtype=np.float64)
-                else:
-                    c2w = np.asarray(ext, dtype=np.float64)
             else:
                 c2w = np.eye(4, dtype=np.float64)
             t_pose = time.perf_counter() - t_pose

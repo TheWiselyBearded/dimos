@@ -68,6 +68,20 @@ logger = logging.getLogger("reachy_replay")
 DIMOS_DIR = Path(__file__).resolve().parent
 DEFAULT_DIMOS_SCRIPT = "mac_iphone_spatial_foxglove.py"
 
+# Optical(RDF: X-right, Y-down, Z-fwd) -> Reachy head/body (FLU: X-fwd, Y-left,
+# Z-up). head_pose.jsonl is recorded straight from get_current_head_pose(),
+# which is in the body convention (create_head_pose builds rotation as euler
+# xyz [roll,pitch,yaw] => yaw about Z). The dimos pipeline back-projects depth
+# in the OpenCV optical convention, so the head pose must be right-multiplied
+# by this constant before being used as c2w — otherwise a head yaw is applied
+# as a roll about the optical view axis and the map fans out.
+_OPT_TO_BODY = np.array([
+    [0.0, 0.0, 1.0, 0.0],
+    [-1.0, 0.0, 0.0, 0.0],
+    [0.0, -1.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+], dtype=np.float64)
+
 
 # ----------------------------------------------------------------------------
 # Playback clock — shared between the VideoSource and the sidecar publisher.
@@ -377,6 +391,9 @@ class HeadPoseInterpolator:
             mats.append(m)
         self._ts = np.asarray(ts, dtype=np.float64)
         if mats:
+            # Convert each body-frame head pose into the optical convention the
+            # pipeline expects, then anchor to the first sample (world=identity).
+            mats = [m @ _OPT_TO_BODY for m in mats]
             inv0 = np.linalg.inv(mats[0])
             self._c2w = [inv0 @ m for m in mats]
         else:
