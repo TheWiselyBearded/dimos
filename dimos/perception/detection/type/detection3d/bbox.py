@@ -18,11 +18,15 @@ from dataclasses import dataclass, field
 import functools
 from typing import Any
 
-from dimos_lcm.vision_msgs import ObjectHypothesis, ObjectHypothesisWithPose
+from dimos_lcm.vision_msgs import BoundingBox3D, ObjectHypothesis, ObjectHypothesisWithPose
 
-from dimos.msgs.geometry_msgs import Pose, PoseStamped, Quaternion, Transform, Vector3
-from dimos.msgs.std_msgs import Header
-from dimos.msgs.vision_msgs import Detection3D
+from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.std_msgs.Header import Header
+from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.perception.detection.type.detection2d.bbox import Detection2DBBox
 
 
@@ -66,13 +70,17 @@ class Detection3DBBox(Detection2DBBox):
                 )
             )
         ]
+        msg.results_length = len(msg.results)
 
-        # Bounding Box
-        msg.bbox.center = Pose(
-            position=self.center,
-            orientation=self.orientation,
+        # The generated LCM constructor reuses a shared default bbox object.
+        # Assign a new BoundingBox3D so this message does not share bbox state with others.
+        msg.bbox = BoundingBox3D(
+            center=Pose(
+                position=self.center,
+                orientation=self.orientation,
+            ),
+            size=self.size,
         )
-        msg.bbox.size = self.size
 
         return msg
 

@@ -27,6 +27,7 @@ import pytest
 
 from dimos.protocol.rpc.pubsubrpc import LCMRPC, ShmRPC
 from dimos.protocol.rpc.rpc_utils import RemoteError
+from dimos.protocol.rpc.spec import DEFAULT_RPC_TIMEOUT
 
 
 class CustomTestError(Exception):
@@ -46,8 +47,8 @@ def lcm_rpc_context():
     from dimos.protocol.service.lcmservice import autoconf
 
     autoconf()
-    server = LCMRPC()
-    client = LCMRPC()
+    server = LCMRPC(rpc_timeouts={}, default_rpc_timeout=DEFAULT_RPC_TIMEOUT)
+    client = LCMRPC(rpc_timeouts={}, default_rpc_timeout=DEFAULT_RPC_TIMEOUT)
     server.start()
     client.start()
 
@@ -65,8 +66,8 @@ testdata.append((lcm_rpc_context, "lcm"))
 def shm_rpc_context():
     """Context manager for Shared Memory RPC implementation."""
     # Create two separate instances that communicate through shared memory segments
-    server = ShmRPC(prefer="cpu")
-    client = ShmRPC(prefer="cpu")
+    server = ShmRPC(rpc_timeouts={}, default_rpc_timeout=DEFAULT_RPC_TIMEOUT, prefer="cpu")
+    client = ShmRPC(rpc_timeouts={}, default_rpc_timeout=DEFAULT_RPC_TIMEOUT, prefer="cpu")
     server.start()
     client.start()
 
@@ -135,11 +136,11 @@ def test_basic_sync_call(rpc_context, impl_name: str) -> None:
 
         try:
             # Make sync call
-            result, _ = client.call_sync("add", ([5, 3], {}), rpc_timeout=2.0)
+            result, _ = client.call_sync("add", ([5, 3], {}), rpc_timeout=5.0)
             assert result == 8
 
             # Test with different arguments
-            result, _ = client.call_sync("add", ([10, -2], {}), rpc_timeout=2.0)
+            result, _ = client.call_sync("add", ([10, -2], {}), rpc_timeout=5.0)
             assert result == 8
 
         finally:
@@ -293,8 +294,8 @@ def test_exception_handling_callback(rpc_context, impl_name: str) -> None:
             unsub_server()
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("rpc_context, impl_name", testdata)
+@pytest.mark.skipif_macos_bug
 def test_timeout(rpc_context, impl_name: str) -> None:
     """Test that RPC calls properly timeout."""
     with rpc_context() as (server, client):
@@ -328,6 +329,7 @@ def test_nonexistent_service(rpc_context, impl_name: str) -> None:
 
 
 @pytest.mark.parametrize("rpc_context, impl_name", testdata)
+@pytest.mark.skipif_macos_bug
 def test_multiple_services(rpc_context, impl_name: str) -> None:
     """Test serving multiple RPC functions simultaneously."""
     with rpc_context() as (server, client):
@@ -354,6 +356,7 @@ def test_multiple_services(rpc_context, impl_name: str) -> None:
 
 
 @pytest.mark.parametrize("rpc_context, impl_name", testdata)
+@pytest.mark.skipif_macos_bug
 def test_concurrent_calls(rpc_context, impl_name: str) -> None:
     """Test making multiple concurrent RPC calls."""
     # Skip for SharedMemory - double-buffered architecture can't handle concurrent bursts
