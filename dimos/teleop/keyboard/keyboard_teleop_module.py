@@ -28,8 +28,8 @@ Keyboard controls:
     ESC: Quit
 """
 
-from dataclasses import dataclass
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Any
@@ -41,11 +41,12 @@ try:
 except ImportError:
     pygame = None  # type: ignore[assignment]
 
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.control.examples.cartesian_ik_jogger import JogState
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
-from dimos.msgs.geometry_msgs import PoseStamped
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
 # Force X11 driver to avoid OpenGL threading issues
 os.environ["SDL_VIDEODRIVER"] = "x11"
@@ -64,28 +65,29 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(max_val, value))
 
 
-@dataclass
 class KeyboardTeleopConfig(ModuleConfig):
-    model_path: str = ""
+    # Accept str or Path-like (incl. LfsPath, which lazy-resolves on str()).
+    model_path: str | Path = ""
     ee_joint_id: int = 6
     task_name: str = "cartesian_ik_arm"
+    home_joints: list[float] | None = None
 
 
-class KeyboardTeleopModule(Module[KeyboardTeleopConfig]):
+class KeyboardTeleopModule(Module):
     """Pygame-based cartesian keyboard teleop as a DimOS Module.
 
     Publishes absolute EE PoseStamped commands for CartesianIKTask.
     """
 
-    default_config = KeyboardTeleopConfig
+    config: KeyboardTeleopConfig
 
     cartesian_command: Out[PoseStamped]
 
     _stop_event: threading.Event
     _thread: threading.Thread | None = None
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self._stop_event = threading.Event()
 
     @rpc
@@ -102,7 +104,7 @@ class KeyboardTeleopModule(Module[KeyboardTeleopConfig]):
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread is not None:
-            self._thread.join(2)
+            self._thread.join(DEFAULT_THREAD_JOIN_TIMEOUT)
         super().stop()
 
     def _pygame_loop(self) -> None:
@@ -110,8 +112,8 @@ class KeyboardTeleopModule(Module[KeyboardTeleopConfig]):
         ee_joint_id = self.config.ee_joint_id
         task_name = self.config.task_name
 
-        # Initialize pose from forward kinematics at zero configuration
-        home_pose = JogState.from_fk(model_path, ee_joint_id)
+        # Initialize pose from forward kinematics at the robot's home configuration
+        home_pose = JogState.from_fk(model_path, ee_joint_id, self.config.home_joints)
         current_pose = home_pose.copy()
 
         # Publish initial pose
@@ -215,6 +217,3 @@ class KeyboardTeleopModule(Module[KeyboardTeleopConfig]):
             clock.tick(50)
 
         pygame.quit()
-
-
-keyboard_teleop_module = KeyboardTeleopModule.blueprint

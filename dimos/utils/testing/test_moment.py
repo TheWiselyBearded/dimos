@@ -13,15 +13,22 @@
 # limitations under the License.
 import time
 
+import pytest
+
 from dimos.core.transport import LCMTransport
-from dimos.msgs.geometry_msgs import PoseStamped, Transform
-from dimos.msgs.sensor_msgs import CameraInfo, Image, PointCloud2
-from dimos.protocol.tf import TF
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
+from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.protocol.tf.tf import TF
 from dimos.robot.unitree.go2 import connection
 from dimos.utils.data import get_data
 from dimos.utils.testing.moment import Moment, SensorMoment
 
-data_dir = get_data("unitree_go2_office_walk2")
+pytestmark = pytest.mark.self_hosted
+
+_DATA_DIR_NAME = "unitree_go2_office_walk2"
 
 
 class Go2Moment(Moment):
@@ -30,6 +37,7 @@ class Go2Moment(Moment):
     odom: SensorMoment[PoseStamped]
 
     def __init__(self) -> None:
+        data_dir = get_data(_DATA_DIR_NAME)
         self.lidar = SensorMoment(f"{data_dir}/lidar", LCMTransport("/lidar", PointCloud2))
         self.video = SensorMoment(f"{data_dir}/video", LCMTransport("/color_image", Image))
         self.odom = SensorMoment(f"{data_dir}/odom", LCMTransport("/odom", PoseStamped))
@@ -40,7 +48,7 @@ class Go2Moment(Moment):
             return []
 
         # we just make sure to change timestamps so that we can jump
-        # back and forth through time and foxglove doesn't get confused
+        # back and forth through time and the viewer doesn't get confused
         odom = self.odom.value
         odom.ts = time.time()
         return connection.GO2Connection._odom_to_tf(odom)
