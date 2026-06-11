@@ -15,6 +15,7 @@
 from collections.abc import Callable
 import threading
 import time
+from typing import Any
 
 import pytest
 
@@ -23,20 +24,20 @@ from dimos.core.module import Module
 from dimos.core.stream import In
 from dimos.core.testing import MockRobotClient
 from dimos.core.transport import LCMTransport, pLCMTransport
-from dimos.msgs.sensor_msgs import PointCloud2
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.robot.unitree.type.odometry import Odometry
 
 
 class SubscriberBase(Module):
-    sub1_msgs: list[Odometry] = None
-    sub2_msgs: list[Odometry] = None
+    sub1_msgs: list[Odometry]
+    sub2_msgs: list[Odometry]
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         self.sub1_msgs = []
         self.sub2_msgs = []
         self._sub1_received = threading.Event()
         self._sub2_received = threading.Event()
-        super().__init__()
+        super().__init__(**kwargs)
 
     def _sub1_callback(self, msg) -> None:
         self.sub1_msgs.append(msg)
@@ -167,8 +168,9 @@ class SpyLCMTransport(LCMTransport):
         return wrapped_unsubscribe
 
 
+@pytest.mark.self_hosted
+@pytest.mark.skipif_macos_bug
 @pytest.mark.parametrize("subscriber_class", [ClassicSubscriber, RXPYSubscriber])
-@pytest.mark.slow
 def test_subscription(dimos, subscriber_class) -> None:
     robot = dimos.deploy(MockRobotClient)
 
@@ -209,7 +211,8 @@ def test_subscription(dimos, subscriber_class) -> None:
     robot.stop_rpc_client()
 
 
-@pytest.mark.slow
+@pytest.mark.self_hosted
+@pytest.mark.skipif_macos_bug
 def test_get_next(dimos) -> None:
     robot = dimos.deploy(MockRobotClient)
 
@@ -241,7 +244,8 @@ def test_get_next(dimos) -> None:
     robot.stop_rpc_client()
 
 
-@pytest.mark.slow
+@pytest.mark.self_hosted
+@pytest.mark.skipif_macos_bug
 def test_hot_getter(dimos) -> None:
     robot = dimos.deploy(MockRobotClient)
 

@@ -13,15 +13,15 @@
 # limitations under the License.
 
 import re
+from typing import Any
 
 from langchain_core.messages import HumanMessage
-import pytest
 
 from dimos.agents.skills.google_maps_skill_container import GoogleMapsSkillContainer
 from dimos.core.module import Module
 from dimos.core.stream import Out
-from dimos.mapping.google_maps.types import Coordinates, LocationContext, Position
-from dimos.mapping.types import LatLon
+from dimos.mapping.google_maps.models import Coordinates, LocationContext, Position
+from dimos.mapping.models import LatLon
 
 
 class FakeGPS(Module):
@@ -39,8 +39,8 @@ class FakeLocationClient:
 
 
 class MockedWhereAmISkill(GoogleMapsSkillContainer):
-    def __init__(self):
-        Module.__init__(self)  # Skip GoogleMapsSkillContainer's __init__.
+    def __init__(self, **kwargs: Any):
+        Module.__init__(self, **kwargs)  # Skip GoogleMapsSkillContainer's __init__.
         self._client = FakeLocationClient()
         self._latest_location = LatLon(lat=37.782654, lon=-122.413273)
         self._started = True
@@ -62,15 +62,14 @@ class FakePositionClient:
 
 
 class MockedPositionSkill(GoogleMapsSkillContainer):
-    def __init__(self):
-        Module.__init__(self)
+    def __init__(self, **kwargs: Any):
+        Module.__init__(self, **kwargs)
         self._client = FakePositionClient()
         self._latest_location = LatLon(lat=37.782654, lon=-122.413273)
         self._started = True
         self._max_valid_distance = 20000
 
 
-@pytest.mark.slow
 def test_where_am_i(agent_setup) -> None:
     history = agent_setup(
         blueprints=[FakeGPS.blueprint(), MockedWhereAmISkill.blueprint()],
@@ -80,7 +79,6 @@ def test_where_am_i(agent_setup) -> None:
     assert "bourbon" in history[-1].content.lower()
 
 
-@pytest.mark.slow
 def test_get_gps_position_for_queries(agent_setup) -> None:
     history = agent_setup(
         blueprints=[FakeGPS.blueprint(), MockedPositionSkill.blueprint()],

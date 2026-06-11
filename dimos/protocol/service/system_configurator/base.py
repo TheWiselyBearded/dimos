@@ -15,31 +15,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from functools import cache
-import logging
 import os
 import subprocess
-from typing import Any
 
-import typer
+from dimos.utils import prompt
+from dimos.utils.logging_config import setup_logger
 
-logger = logging.getLogger(__name__)
-
-# ----------------------------- sudo helpers -----------------------------
-
-
-@cache
-def _is_root_user() -> bool:
-    try:
-        return os.geteuid() == 0
-    except AttributeError:
-        return False
-
-
-def sudo_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-    if _is_root_user():
-        return subprocess.run(list(args), **kwargs)
-    return subprocess.run(["sudo", *args], **kwargs)
+logger = setup_logger()
 
 
 def _read_sysctl_int(name: str) -> int | None:
@@ -63,10 +45,10 @@ def _read_sysctl_int(name: str) -> int | None:
 
 
 def _write_sysctl_int(name: str, value: int) -> None:
-    sudo_run("sysctl", "-w", f"{name}={value}", check=True, text=True, capture_output=False)
+    prompt.sudo_run("sysctl", "-w", f"{name}={value}", check=True, text=True, capture_output=True)
 
 
-# -------------------------- base class for system config checks/requirements --------------------------
+# base class for system config checks/requirements
 
 
 class SystemConfigurator(ABC):
@@ -91,12 +73,16 @@ class SystemConfigurator(ABC):
         raise NotImplementedError
 
 
-# ----------------------------- generic enforcement of system configs -----------------------------
+# generic enforcement of system configs
 
 
 def configure_system(checks: list[SystemConfigurator], check_only: bool = False) -> None:
-    if os.environ.get("CI"):
-        logger.info("CI environment detected: skipping system configuration.")
+    # Skip in test runs — we'd otherwise prompt for sudo from a non-
+    # interactive subprocess and kill the worker. The self-hosted CI
+    # runner has its host config baked in via the container image, so
+    # it doesn't need configurators to fix anything either.
+    if os.environ.get("PYTEST_VERSION"):
+        logger.info("Pytest run detected: skipping system configuration.")
         return
 
     # run checks
@@ -114,7 +100,7 @@ def configure_system(checks: list[SystemConfigurator], check_only: bool = False)
     if check_only:
         return
 
-    if not typer.confirm("\nApply these changes now?"):
+    if not prompt.confirm("\nApply these changes now?"):
         if any(check.critical for check in failing):
             raise SystemExit(1)
         return
