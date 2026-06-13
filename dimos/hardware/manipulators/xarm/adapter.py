@@ -39,6 +39,11 @@ from dimos.hardware.manipulators.spec import (
 MM_TO_M = 0.001
 M_TO_MM = 1000.0
 MAX_CARTESIAN_SPEED_MM = 500.0  # Max cartesian speed in mm/s
+_XARM_LIFECYCLE_SPEED_DEG = 20.0
+_XARM_LIFECYCLE_ACCEL_DEG = 500.0
+_XARM6_INITIAL_JOINTS_DEG = [0.0, -40.0, -50.0, 0.0, 90.0, 0.0]
+# TODO (CC): change this once we have 7dof arm setup
+_XARM7_INITIAL_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0, 0.0, math.degrees(-0.7), 0.0]
 
 # XArm mode codes
 _XARM_MODE_POSITION = 0
@@ -63,10 +68,6 @@ class XArmAdapter(ManipulatorAdapter):
         self._arm: XArmAPI | None = None
         self._control_mode: ControlMode = ControlMode.POSITION
         self._gripper_enabled: bool = False
-
-    # =========================================================================
-    # Connection
-    # =========================================================================
 
     def connect(self) -> bool:
         """Connect to XArm via TCP/IP."""
@@ -98,10 +99,6 @@ class XArmAdapter(ManipulatorAdapter):
         """Check if connected to XArm."""
         return self._arm is not None and self._arm.connected
 
-    # =========================================================================
-    # Info
-    # =========================================================================
-
     def get_info(self) -> ManipulatorInfo:
         """Get XArm information."""
         return ManipulatorInfo(
@@ -123,10 +120,6 @@ class XArmAdapter(ManipulatorAdapter):
             position_upper=[limit] * self._dof,
             velocity_max=[math.pi] * self._dof,  # ~180 deg/s
         )
-
-    # =========================================================================
-    # Control Mode
-    # =========================================================================
 
     def set_control_mode(self, mode: ControlMode) -> bool:
         """Set XArm control mode.
@@ -160,10 +153,6 @@ class XArmAdapter(ManipulatorAdapter):
     def get_control_mode(self) -> ControlMode:
         """Get current control mode."""
         return self._control_mode
-
-    # =========================================================================
-    # State Reading
-    # =========================================================================
 
     def read_joint_positions(self) -> list[float]:
         """Read joint positions (degrees -> radians)."""
@@ -214,10 +203,6 @@ class XArmAdapter(ManipulatorAdapter):
             return 0, ""
         return code, f"XArm error {code}"
 
-    # =========================================================================
-    # Motion Control (Joint Space)
-    # =========================================================================
-
     def write_joint_positions(
         self,
         positions: list[float],
@@ -243,6 +228,64 @@ class XArmAdapter(ManipulatorAdapter):
         code: int = self._arm.set_servo_angle_j(angles, speed=100, mvacc=500)
         return code == 0
 
+    def activate(self) -> bool:
+        """Enable motion and move the arm to its initial joint pose."""
+        if not self._arm:
+            return False
+
+        self._prepare_for_position_motion()
+        if not self._move_to_initial_pose():
+            return False
+        return self.set_control_mode(ControlMode.SERVO_POSITION)
+
+    def deactivate(self) -> bool:
+        """Move the arm to its initial joint pose and enter stopped state."""
+        if not self._arm:
+            return False
+
+        self._prepare_for_position_motion()
+        if not self._move_to_initial_pose():
+            return False
+        self._arm.motion_enable(enable=False)
+        code: int = self._arm.set_state(4)
+        return code == 0
+
+    def _move_to_initial_pose(self) -> bool:
+        if not self._arm:
+            return False
+
+        joints = self._initial_joints_degrees()
+        if joints is None:
+            return True
+
+        code: int = self._arm.set_servo_angle(
+            angle=joints,
+            speed=_XARM_LIFECYCLE_SPEED_DEG,
+            mvacc=_XARM_LIFECYCLE_ACCEL_DEG,
+            wait=True,
+        )
+        return code == 0
+
+    def _initial_joints_degrees(self) -> list[float] | None:
+        if self._dof == 6:
+            return _XARM6_INITIAL_JOINTS_DEG
+        if self._dof == 7:
+            return _XARM7_INITIAL_JOINTS_DEG
+        return None
+
+    def _prepare_for_position_motion(self) -> None:
+        if not self._arm:
+            return
+
+        if self._arm.warn_code != 0:
+            self._arm.clean_warn()
+        if self._arm.error_code != 0:
+            self._arm.clean_error()
+        self._arm.motion_enable(enable=True)
+        self._arm.set_mode(_XARM_MODE_POSITION)
+        self._arm.set_state(0)
+        self._control_mode = ControlMode.POSITION
+
     def write_joint_velocities(self, velocities: list[float]) -> bool:
         """Write joint velocities (rad/s -> deg/s).
 
@@ -262,10 +305,6 @@ class XArmAdapter(ManipulatorAdapter):
             return False
         code: int = self._arm.emergency_stop()
         return code == 0
-
-    # =========================================================================
-    # Servo Control
-    # =========================================================================
 
     def write_enable(self, enable: bool) -> bool:
         """Enable or disable servos."""
@@ -288,10 +327,6 @@ class XArmAdapter(ManipulatorAdapter):
             return False
         code: int = self._arm.clean_error()
         return code == 0
-
-    # =========================================================================
-    # Cartesian Control (Optional)
-    # =========================================================================
 
     def read_cartesian_position(self) -> dict[str, float] | None:
         """Read end-effector pose (mm -> meters, degrees -> radians)."""
@@ -331,10 +366,6 @@ class XArmAdapter(ManipulatorAdapter):
         )
         return code == 0
 
-    # =========================================================================
-    # Gripper (Optional)
-    # =========================================================================
-
     def read_gripper_position(self) -> float | None:
         """Read gripper position (mm -> meters)."""
         if not self._arm:
@@ -358,10 +389,6 @@ class XArmAdapter(ManipulatorAdapter):
         pos_mm = position * M_TO_MM
         code: int = self._arm.set_gripper_position(pos_mm, wait=False)
         return code == 0
-
-    # =========================================================================
-    # Force/Torque Sensor (Optional)
-    # =========================================================================
 
     def read_force_torque(self) -> list[float] | None:
         """Read F/T sensor data if available."""

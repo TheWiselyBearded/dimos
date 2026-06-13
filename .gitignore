@@ -2,6 +2,9 @@
 **/*.ignore
 **/*.ignore.*
 
+# Default output of `dimos apriltag`
+/apriltags.pdf
+
 .vscode/
 
 # Ignore Python cache files
@@ -38,10 +41,16 @@ __pycache__
 node_modules
 package.json
 package-lock.json
+!docs/package.json
+!docs/package-lock.json
 
 # Ignore build artifacts
 dist/
 build/
+
+# Rust build artifacts
+**/target/
+**/*.rs.bk
 
 # Ignore data directory but keep .lfs subdirectory
 data/*
@@ -57,8 +66,11 @@ data/*
 # symlink one of .envrc.* if you'd like to use
 .envrc
 .claude
+.opencode/
 **/CLAUDE.md
+.omo/
 .direnv/
+.omo/
 
 /logs
 
@@ -68,7 +80,9 @@ data/*
 
 *mobileclip*
 /results
+results/
 **/cpp/result
+**/rust/result
 
 CLAUDE.MD
 /assets/teleop_certs/
@@ -80,3 +94,14 @@ CLAUDE.MD
 htmlcov/
 .coverage
 .coverage.*
+
+# Memory2 autorecord
+recording*.db
+
+# Rerun recordings
+*.rrd
+
+/misc/fresh-ubuntu-tests/cache
+
+# openspec
+/openspec/changes/archive/

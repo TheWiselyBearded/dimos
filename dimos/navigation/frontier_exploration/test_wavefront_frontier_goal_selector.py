@@ -17,8 +17,8 @@ import time
 import numpy as np
 import pytest
 
-from dimos.msgs.geometry_msgs import Vector3
-from dimos.msgs.nav_msgs import CostValues, OccupancyGrid
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.nav_msgs.OccupancyGrid import CostValues, OccupancyGrid
 from dimos.navigation.frontier_exploration.wavefront_frontier_goal_selector import (
     WavefrontFrontierExplorer,
 )
@@ -56,7 +56,7 @@ def quick_costmap():
     # One obstacle
     grid[9:10, 9:10] = CostValues.OCCUPIED
 
-    from dimos.msgs.geometry_msgs import Pose
+    from dimos.msgs.geometry_msgs.Pose import Pose
 
     origin = Pose()
     origin.position.x = -1.0
@@ -97,7 +97,7 @@ def create_test_costmap(width: int = 40, height: int = 40, resolution: float = 0
     grid[13:14, 18:22] = CostValues.OCCUPIED  # Top corridor obstacle
 
     # Create origin at bottom-left, adjusted for map size
-    from dimos.msgs.geometry_msgs import Pose
+    from dimos.msgs.geometry_msgs.Pose import Pose
 
     origin = Pose()
     # Center the map around (0, 0) in world coordinates
@@ -262,7 +262,7 @@ def test_frontier_ranking(explorer) -> None:
         # Note: Goals might be closer than safe_distance if that's the best available frontier
         # The safe_distance is used for scoring, not as a hard constraint
         print(
-            f"Distance to obstacles: {obstacle_dist:.2f}m (safe distance: {explorer.safe_distance}m)"
+            f"Distance to obstacles: {obstacle_dist:.2f}m (safe distance: {explorer.config.safe_distance}m)"
         )
 
         print(f"Frontier ranking test passed - selected goal at ({goal1.x:.2f}, {goal1.y:.2f})")
@@ -366,3 +366,23 @@ def test_performance_timing() -> None:
         assert result["goal_time"] < 1.5, f"Goal selection too slow: {result['goal_time']}s"
 
     print("\nPerformance test passed - all operations completed within time limits")
+
+
+def test_exploration_loop_releases_movement_on_exit(explorer, mocker) -> None:
+    """`_exploration_loop` closes the `begin_exploration` tool-stream on every
+    exit path, so natural completion (no-gain / consecutive failures) releases
+    the `movement` capability -- not only the explicit `end_exploration` path.
+    """
+    stop_spy = mocker.patch.object(explorer, "stop_tool")
+
+    # Inner loop self-terminates normally.
+    mocker.patch.object(explorer, "_run_exploration_loop", return_value=None)
+    explorer._exploration_loop()
+    stop_spy.assert_called_once_with("begin_exploration")
+
+    # An unexpected error still releases the hold via `finally`.
+    stop_spy.reset_mock()
+    mocker.patch.object(explorer, "_run_exploration_loop", side_effect=RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        explorer._exploration_loop()
+    stop_spy.assert_called_once_with("begin_exploration")
