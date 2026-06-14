@@ -28,7 +28,7 @@ Available functions:
     state()               Get module state (IDLE, PLANNING, EXECUTING, ...)
     plan(joints)          Plan to joint configuration, e.g. plan([0.1]*7)
     plan_pose(x,y,z)      Plan to Cartesian pose
-    preview(duration)     Preview planned path in Meshcat
+    preview(duration=None) Preview planned path in Meshcat
     execute()             Execute planned trajectory via coordinator
     home()                Move to home position
     url()                 Get Meshcat visualization URL
@@ -49,7 +49,9 @@ from typing import Any
 
 from dimos.core.rpc_client import RPCClient
 from dimos.manipulation.manipulation_module import ManipulationModule
-from dimos.msgs.geometry_msgs import Pose, Quaternion, Vector3
+from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
 _client = RPCClient(None, ManipulationModule)
 
@@ -71,7 +73,7 @@ def state() -> str:
 
 def plan(target_joints: list[float], robot_name: str | None = None) -> bool:
     """Plan to joint configuration. e.g. plan([0.1]*7)"""
-    from dimos.msgs.sensor_msgs import JointState
+    from dimos.msgs.sensor_msgs.JointState import JointState
 
     js = JointState(position=target_joints)
     return _client.plan_to_joints(js, robot_name)
@@ -87,16 +89,23 @@ def plan_pose(
     robot_name: str | None = None,
 ) -> bool:
     """Plan to Cartesian pose. Preserves current orientation if rpy not given."""
-    orientation = Quaternion(0, 0, 0, 1)
     if roll is not None or pitch is not None or yaw is not None:
         orientation = Quaternion.from_euler(Vector3(x=roll or 0, y=pitch or 0, z=yaw or 0))
+    else:
+        # Preserve current EE orientation
+        current = _client.get_ee_pose(robot_name)
+        orientation = current.orientation if current else Quaternion(0, 0, 0, 1)
     target = Pose(position=Vector3(x=x, y=y, z=z), orientation=orientation)
     return _client.plan_to_pose(target, robot_name)
 
 
-def preview(duration: float = 3.0, robot_name: str | None = None) -> bool:
+def preview(
+    duration: float | None = None,
+    robot_name: str | None = None,
+    target_fps: float = 30.0,
+) -> bool:
     """Preview planned path in Meshcat."""
-    return _client.preview_path(duration, robot_name)
+    return _client.preview_path(duration, robot_name, target_fps)
 
 
 def execute(robot_name: str | None = None) -> bool:
@@ -106,7 +115,7 @@ def execute(robot_name: str | None = None) -> bool:
 
 def home(robot_name: str | None = None) -> bool:
     """Plan and execute move to home position."""
-    from dimos.msgs.sensor_msgs import JointState
+    from dimos.msgs.sensor_msgs.JointState import JointState
 
     home_joints = _client.get_robot_info(robot_name).get("home_joints", [0.0] * 7)
     success = _client.plan_to_joints(JointState(position=home_joints), robot_name)

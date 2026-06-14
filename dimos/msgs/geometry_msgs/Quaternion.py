@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from io import BytesIO
+import math
 import struct
 from typing import TYPE_CHECKING, BinaryIO, TypeAlias
 
@@ -25,12 +26,11 @@ if TYPE_CHECKING:
 from dimos_lcm.geometry_msgs import Quaternion as LCMQuaternion
 import numpy as np
 from plum import dispatch
-from scipy.spatial.transform import Rotation as R  # type: ignore[import-untyped]
 
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
 # Types that can be converted to/from Quaternion
-QuaternionConvertable: TypeAlias = Sequence[int | float] | LCMQuaternion | np.ndarray  # type: ignore[type-arg]
+QuaternionConvertable: TypeAlias = Sequence[int | float] | LCMQuaternion | np.ndarray
 
 
 class Quaternion(LCMQuaternion):  # type: ignore[misc]
@@ -63,7 +63,7 @@ class Quaternion(LCMQuaternion):  # type: ignore[misc]
         self.w = float(w)
 
     @dispatch  # type: ignore[no-redef]
-    def __init__(self, sequence: Sequence[int | float] | np.ndarray) -> None:  # type: ignore[type-arg]
+    def __init__(self, sequence: Sequence[int | float] | np.ndarray) -> None:
         if isinstance(sequence, np.ndarray):
             if sequence.size != 4:
                 raise ValueError("Quaternion requires exactly 4 components [x, y, z, w]")
@@ -99,7 +99,7 @@ class Quaternion(LCMQuaternion):  # type: ignore[misc]
         """List representation of the quaternion (x, y, z, w)."""
         return [self.x, self.y, self.z, self.w]
 
-    def to_numpy(self) -> np.ndarray:  # type: ignore[type-arg]
+    def to_numpy(self) -> np.ndarray:
         """Numpy array representation of the quaternion (x, y, z, w)."""
         return np.array([self.x, self.y, self.z, self.w])
 
@@ -147,7 +147,7 @@ class Quaternion(LCMQuaternion):  # type: ignore[misc]
         return cls(x, y, z, w)
 
     @classmethod
-    def from_rotation_matrix(cls, matrix: np.ndarray) -> Quaternion:  # type: ignore[type-arg]
+    def from_rotation_matrix(cls, matrix: np.ndarray) -> Quaternion:
         """Convert a 3x3 rotation matrix to quaternion.
 
         Args:
@@ -156,9 +156,21 @@ class Quaternion(LCMQuaternion):  # type: ignore[misc]
         Returns:
             Quaternion representation
         """
-        rotation = R.from_matrix(matrix)
+        from scipy.spatial.transform import (
+            Rotation,  # ~330ms: deferred to avoid startup cost
+        )
+
+        rotation = Rotation.from_matrix(matrix)
         quat = rotation.as_quat()  # Returns [x, y, z, w]
         return cls(quat[0], quat[1], quat[2], quat[3])
+
+    def to_rotation_matrix(self) -> np.ndarray:
+        """Convert quaternion to a 3x3 rotation matrix."""
+        from scipy.spatial.transform import (
+            Rotation,  # ~330ms: deferred to avoid startup cost
+        )
+
+        return np.asarray(Rotation.from_quat([self.x, self.y, self.z, self.w]).as_matrix())
 
     def to_euler(self) -> Vector3:
         """Convert quaternion to Euler angles (roll, pitch, yaw) in radians.
@@ -167,8 +179,12 @@ class Quaternion(LCMQuaternion):  # type: ignore[misc]
             Vector3: Euler angles as (roll, pitch, yaw) in radians
         """
         # Use scipy for accurate quaternion to euler conversion
+        from scipy.spatial.transform import (
+            Rotation,  # ~330ms: deferred to avoid startup cost
+        )
+
         quat = [self.x, self.y, self.z, self.w]
-        rotation = R.from_quat(quat)
+        rotation = Rotation.from_quat(quat)
         euler_angles = rotation.as_euler("xyz")  # roll, pitch, yaw
 
         return Vector3(euler_angles[0], euler_angles[1], euler_angles[2])
@@ -197,6 +213,10 @@ class Quaternion(LCMQuaternion):  # type: ignore[misc]
             return False
         return self.x == other.x and self.y == other.y and self.z == other.z and self.w == other.w
 
+    def is_zero(self) -> bool:
+        """All components are zero — i.e. an uninitialized placeholder, not a valid rotation."""
+        return self.x == 0.0 and self.y == 0.0 and self.z == 0.0 and self.w == 0.0
+
     def __mul__(self, other: Quaternion) -> Quaternion:
         """Multiply two quaternions (Hamilton product).
 
@@ -213,6 +233,17 @@ class Quaternion(LCMQuaternion):  # type: ignore[misc]
         z = self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w
 
         return Quaternion(x, y, z, w)
+
+    def dot(self, other: Quaternion) -> float:
+        return float(self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w)
+
+    def angle_to(self, other: Quaternion) -> float:
+        """Smallest rotation angle (radians) between two unit quaternions.
+
+        ``abs(self.dot(other))`` collapses the double-cover sign ambiguity;
+        the ``min(1.0, ...)`` clamps against numerical drift past 1.
+        """
+        return 2.0 * math.acos(min(1.0, abs(self.dot(other))))
 
     def conjugate(self) -> Quaternion:
         """Return the conjugate of the quaternion.

@@ -1,6 +1,6 @@
 # Go2 Non-ROS Navigation
 
-<img src="assets/noros_nav.gif" width="100%">
+![output](assets/noros_nav.gif)
 
 The Go2 navigation stack runs entirely without ROS. It uses a **column-carving voxel map** strategy: each new LiDAR frame replaces the corresponding region of the global map entirely, ensuring the map always reflects the latest observations.
 
@@ -37,8 +37,8 @@ text "Twist" italic at (M4.x, Nav.s.y - 0.45in)
 
 </details>
 
-<!--Result:-->
 ![output](assets/go2nav_dataflow.svg)
+
 ## Pipeline Steps
 
 ### 1. LiDAR Frame — [`GO2Connection`](/dimos/robot/unitree/go2/connection.py)
@@ -116,29 +116,65 @@ All visualization layers shown together
 
 ![All layers](assets/5-all.png)
 
+## Patrolling
+
+The patrolling system drives the robot to systematically cover a **known** area. It is exposed as an agent skill. An LLM agent can call `start_patrol` and `stop_patrol` to control it. Note that the area has to be explored first.
+
+### How it works
+
+1. **Visitation tracking** — As the robot moves, a visitation grid (aligned to the costmap) marks cells around the robot's position as visited. This gives the system a running picture of where the robot has and hasn't been. This expires over time, and has to be visited again.
+
+2. **Goal selection** — A *patrol router* picks the next goal. The default strategy is **coverage**: it samples a handful of candidate points from unvisited, obstacle-free cells, plans a path to each one, and picks the candidate whose path would cover the most new ground. Candidates are weighted by a Voronoi skeleton so goals are more likely to be spread evenly across the map, rather than clustering in large open areas.
+
+3. **Navigation loop** — The module sends each goal to the planner and waits for a `goal_reached` signal before requesting the next one. If no valid goal is available (e.g. the map hasn't loaded yet), it retries after a short delay.
+
+4. **Stopping** — When patrol is stopped, the module cancels in-progress navigation by publishing the robot's current pose as the goal, then re-enables the planner's normal replanning behavior.
+
+### Patrol router strategies
+
+| Router       | Behavior                                                                                       |
+|--------------|------------------------------------------------------------------------------------------------|
+| `coverage`   | Maximizes new-cell coverage per goal. Uses Voronoi weighting for even spatial distribution.     |
+| `random`     | Picks a random unvisited, obstacle-free cell.                                                  |
+| `frontier`   | Targets the boundary between known and unknown space, useful for exploration-style patrol.      |
+
+### Safety
+
+Goal candidates are filtered through a **safe mask** — the free-space region eroded by the robot's clearance radius — so the robot is never sent to a position too close to walls or obstacles. The planner's safe-goal clearance is also tightened while patrolling to ensure the robot can rotate in place at every goal.
+
+### Router comparison
+
+| Coverage | Frontier | Random |
+|----------|----------|--------|
+| ![coverage](assets/coverage.png) | ![frontier](assets/frontier.png) | ![random](assets/random.png) |
+
+### Sample patrol trace (26 min)
+
+![Patrol path](assets/patrol_path.png)
+
 ## Blueprint Composition
 
-The navigation stack is composed in the [`unitree_go2`](/dimos/robot/unitree/go2/blueprints/__init__.py) blueprint:
+The navigation stack is composed in the [`unitree_go2`](/dimos/robot/unitree/go2/blueprints/smart/unitree_go2.py) blueprint:
 
-```python fold output=assets/go2_blueprint.svg
-from dimos.core.blueprints import autoconnect
-from dimos.core.introspection import to_svg
-from dimos.mapping.costmapper import cost_mapper
-from dimos.mapping.voxels import voxel_mapper
-from dimos.navigation.frontier_exploration import wavefront_frontier_explorer
-from dimos.navigation.replanning_a_star.module import replanning_a_star_planner
+```python skip fold output=assets/go2_blueprint.svg
+from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.introspection.svg import to_svg
+from dimos.mapping.costmapper import CostMapper
+from dimos.mapping.voxels import VoxelGridMapper
+from dimos.navigation.frontier_exploration.wavefront_frontier_goal_selector import (
+    WavefrontFrontierExplorer,
+)
+from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import unitree_go2_basic
 
 unitree_go2 = autoconnect(
-    unitree_go2_basic,                    # robot connection + visualization
-    voxel_mapper(voxel_size=0.05),        # 3D voxel mapping
-    cost_mapper(),                        # 2D costmap generation
-    replanning_a_star_planner(),          # path planning
-    wavefront_frontier_explorer(),        # exploration
+    unitree_go2_basic,
+    VoxelGridMapper.blueprint(),
+    CostMapper.blueprint(),
+    ReplanningAStarPlanner.blueprint(),
+    WavefrontFrontierExplorer.blueprint(),
 ).global_config(n_workers=6, robot_model="unitree_go2")
 
 to_svg(unitree_go2, "assets/go2_blueprint.svg")
 ```
-
-<!--Result:-->
 ![output](assets/go2_blueprint.svg)

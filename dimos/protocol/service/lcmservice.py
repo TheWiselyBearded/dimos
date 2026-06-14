@@ -15,16 +15,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 import os
 import platform
 import threading
 import traceback
+from typing import Any
 
-import lcm
+import lcm as lcm_mod
 
-from dimos.protocol.service.spec import Service
-from dimos.protocol.service.system_configurator import configure_system, lcm_configurators
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
+from dimos.protocol.service.spec import BaseConfig, Service
+from dimos.protocol.service.system_configurator.base import configure_system
+from dimos.protocol.service.system_configurator.lcm_config import lcm_configurators
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -45,15 +47,10 @@ def autoconf(check_only: bool = False) -> None:
     configure_system(checks, check_only=check_only)
 
 
-@dataclass
-class LCMConfig:
+class LCMConfig(BaseConfig):
     ttl: int = 0
-    url: str | None = None
-    lcm: lcm.LCM | None = None
-
-    def __post_init__(self) -> None:
-        if self.url is None:
-            self.url = _DEFAULT_LCM_URL
+    url: str = _DEFAULT_LCM_URL
+    lcm: lcm_mod.LCM | None = None
 
 
 _LCM_LOOP_TIMEOUT = 50
@@ -62,26 +59,28 @@ _LCM_LOOP_TIMEOUT = 50
 # this class just sets up cpp LCM instance
 # and runs its handle loop in a thread
 # higher order stuff is done by pubsub/impl/lcmpubsub.py
-class LCMService(Service[LCMConfig]):
-    default_config = LCMConfig
-    l: lcm.LCM | None
+class LCMService(Service):
+    config: LCMConfig
+    l: lcm_mod.LCM | None
     _stop_event: threading.Event
+    _loop_running: threading.Event
     _l_lock: threading.Lock
     _thread: threading.Thread | None
     _call_thread_pool: ThreadPoolExecutor | None = None
     _call_thread_pool_lock: threading.RLock = threading.RLock()
 
-    def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
         # we support passing an existing LCM instance
         if self.config.lcm:
             self.l = self.config.lcm
         else:
-            self.l = lcm.LCM(self.config.url) if self.config.url else lcm.LCM()
+            self.l = lcm_mod.LCM(self.config.url) if self.config.url else lcm_mod.LCM()
 
         self._l_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._loop_running = threading.Event()
         self._thread = None
 
     def __getstate__(self):  # type: ignore[no-untyped-def]
@@ -90,6 +89,7 @@ class LCMService(Service[LCMConfig]):
         # Remove unpicklable attributes
         state.pop("l", None)
         state.pop("_stop_event", None)
+        state.pop("_loop_running", None)
         state.pop("_thread", None)
         state.pop("_l_lock", None)
         state.pop("_call_thread_pool", None)
@@ -102,6 +102,7 @@ class LCMService(Service[LCMConfig]):
         # Reinitialize runtime attributes
         self.l = None
         self._stop_event = threading.Event()
+        self._loop_running = threading.Event()
         self._thread = None
         self._l_lock = threading.Lock()
         self._call_thread_pool = None
@@ -113,15 +114,19 @@ class LCMService(Service[LCMConfig]):
             if self.config.lcm:
                 self.l = self.config.lcm
             else:
-                self.l = lcm.LCM(self.config.url) if self.config.url else lcm.LCM()
+                self.l = lcm_mod.LCM(self.config.url) if self.config.url else lcm_mod.LCM()
 
         self._stop_event.clear()
+        self._loop_running.clear()
         self._thread = threading.Thread(target=self._lcm_loop)
         self._thread.daemon = True
         self._thread.start()
+        if not self._loop_running.wait(timeout=5.0):
+            raise RuntimeError("LCM handler thread failed to start within 5s")
 
     def _lcm_loop(self) -> None:
         """LCM message handling loop."""
+        primed = False
         while not self._stop_event.is_set():
             try:
                 with self._l_lock:
@@ -131,6 +136,11 @@ class LCMService(Service[LCMConfig]):
             except Exception as e:
                 stack_trace = traceback.format_exc()
                 print(f"Error in LCM handling: {e}\n{stack_trace}")
+            if not primed:
+                # Signal start() only after one full poll cycle, so callers
+                # don't race the first handle_timeout dispatch.
+                primed = True
+                self._loop_running.set()
 
     def stop(self) -> None:
         """Stop the LCM loop."""
@@ -138,7 +148,7 @@ class LCMService(Service[LCMConfig]):
         if self._thread is not None:
             # Only join if we're not the LCM thread (avoid "cannot join current thread")
             if threading.current_thread() != self._thread:
-                self._thread.join(timeout=1.0)
+                self._thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
                 if self._thread.is_alive():
                     logger.warning("LCM thread did not stop cleanly within timeout")
 

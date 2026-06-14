@@ -75,10 +75,6 @@ class PiperAdapter(ManipulatorAdapter):
         self._enabled: bool = False
         self._control_mode: ControlMode = ControlMode.POSITION
 
-    # =========================================================================
-    # Connection
-    # =========================================================================
-
     def connect(self) -> bool:
         """Connect to Piper via CAN bus."""
         try:
@@ -139,9 +135,13 @@ class PiperAdapter(ManipulatorAdapter):
         except Exception:
             return False
 
-    # =========================================================================
-    # Info
-    # =========================================================================
+    def activate(self) -> bool:
+        return self.write_enable(True)
+
+    def deactivate(self) -> bool:
+        stopped = self.write_stop()
+        disabled = self.write_enable(False)
+        return stopped and disabled
 
     def get_info(self) -> ManipulatorInfo:
         """Get Piper information."""
@@ -176,10 +176,6 @@ class PiperAdapter(ManipulatorAdapter):
             velocity_max=max_vel,
         )
 
-    # =========================================================================
-    # Control Mode
-    # =========================================================================
-
     def set_control_mode(self, mode: ControlMode) -> bool:
         """Set Piper control mode via MotionCtrl_2."""
         if not self._sdk:
@@ -206,10 +202,6 @@ class PiperAdapter(ManipulatorAdapter):
     def get_control_mode(self) -> ControlMode:
         """Get current control mode."""
         return self._control_mode
-
-    # =========================================================================
-    # State Reading
-    # =========================================================================
 
     def read_joint_positions(self) -> list[float]:
         """Read joint positions (Piper units -> radians)."""
@@ -295,10 +287,6 @@ class PiperAdapter(ManipulatorAdapter):
 
         return 0, ""
 
-    # =========================================================================
-    # Motion Control (Joint Space)
-    # =========================================================================
-
     def write_joint_positions(
         self,
         positions: list[float],
@@ -366,10 +354,6 @@ class PiperAdapter(ManipulatorAdapter):
         # Fallback: disable arm
         return self.write_enable(False)
 
-    # =========================================================================
-    # Servo Control
-    # =========================================================================
-
     def write_enable(self, enable: bool) -> bool:
         """Enable or disable servos."""
         if not self._sdk:
@@ -427,10 +411,6 @@ class PiperAdapter(ManipulatorAdapter):
         time.sleep(0.1)
         return self.write_enable(True)
 
-    # =========================================================================
-    # Cartesian Control (Optional)
-    # =========================================================================
-
     def read_cartesian_position(self) -> dict[str, float] | None:
         """Read end-effector pose.
 
@@ -470,10 +450,6 @@ class PiperAdapter(ManipulatorAdapter):
         # Cartesian control not commonly supported in Piper SDK
         return False
 
-    # =========================================================================
-    # Gripper (Optional)
-    # =========================================================================
-
     def read_gripper_position(self) -> float | None:
         """Read gripper position (percentage -> meters)."""
         if not self._sdk:
@@ -507,10 +483,6 @@ class PiperAdapter(ManipulatorAdapter):
             pass
 
         return False
-
-    # =========================================================================
-    # Force/Torque Sensor (Optional)
-    # =========================================================================
 
     def read_force_torque(self) -> list[float] | None:
         """Read F/T sensor data.

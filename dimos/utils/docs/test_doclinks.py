@@ -16,9 +16,12 @@
 
 from pathlib import Path
 
-from doclinks import (
+import pytest
+
+from dimos.utils.docs.doclinks import (
     build_doc_index,
     build_file_index,
+    collect_markdown_files,
     extract_other_backticks,
     find_symbol_line,
     pick_best_candidate,
@@ -27,7 +30,6 @@ from doclinks import (
     score_path_similarity,
     split_by_ignore_regions,
 )
-import pytest
 
 # Use the actual repo root
 REPO_ROOT = Path(__file__).parent.parent.parent.parent
@@ -773,3 +775,14 @@ class TestLinkResolution:
         assert len(errors) == 0
         assert len(changes) == 0
         assert new_content == content
+
+
+def test_collect_markdown_files_skips_node_modules(tmp_path: Path) -> None:
+    (tmp_path / "guide.md").write_text("# Guide\n")
+    node_modules = tmp_path / "node_modules" / "pkg"
+    node_modules.mkdir(parents=True)
+    (node_modules / "README.md").write_text("# Dep\n")
+
+    collected = collect_markdown_files([str(tmp_path)])
+
+    assert collected == [tmp_path / "guide.md"]

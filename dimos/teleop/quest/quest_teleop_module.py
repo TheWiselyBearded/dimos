@@ -21,12 +21,13 @@ FastAPI WebSocket server.  Transforms from WebXR to robot frame, computes
 deltas, and publishes PoseStamped commands.
 """
 
+import asyncio
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 from dimos_lcm.geometry_msgs import PoseStamped as LCMPoseStamped
 from dimos_lcm.sensor_msgs import Joy as LCMJoy
@@ -37,8 +38,8 @@ from fastapi.staticfiles import StaticFiles
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
-from dimos.msgs.geometry_msgs import PoseStamped
-from dimos.msgs.sensor_msgs import Joy
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.sensor_msgs.Joy import Joy
 from dimos.teleop.quest.quest_types import Buttons, QuestControllerState
 from dimos.teleop.utils.teleop_transforms import webxr_to_robot
 from dimos.utils.logging_config import setup_logger
@@ -68,7 +69,6 @@ class QuestTeleopStatus:
     buttons: Buttons
 
 
-@dataclass
 class QuestTeleopConfig(ModuleConfig):
     """Configuration for Quest Teleoperation Module."""
 
@@ -76,7 +76,10 @@ class QuestTeleopConfig(ModuleConfig):
     server_port: int = 8443
 
 
-class QuestTeleopModule(Module[QuestTeleopConfig]):
+_Config = TypeVar("_Config", bound=QuestTeleopConfig)
+
+
+class QuestTeleopModule(Module):
     """Quest Teleoperation Module for Meta Quest controllers.
 
     Receives controller data from the Quest web app via an embedded WebSocket
@@ -89,19 +92,15 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
         - buttons: Buttons (button states for both controllers)
     """
 
-    default_config = QuestTeleopConfig
+    config: QuestTeleopConfig
 
     # Outputs: delta poses for each controller
     left_controller_output: Out[PoseStamped]
     right_controller_output: Out[PoseStamped]
     buttons: Out[Buttons]
 
-    # -------------------------------------------------------------------------
-    # Initialization
-    # -------------------------------------------------------------------------
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
 
         # Engage state (per-hand)
         self._is_engaged: dict[Hand, bool] = {Hand.LEFT: False, Hand.RIGHT: False}
@@ -127,11 +126,14 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
             LCMJoy._get_packed_fingerprint(): self._on_joy_bytes,
         }
 
-        self._setup_routes()
+        # Tracked here so subclasses can push from non-asyncio threads.
+        # _clients_lock guards add/discard/snapshot of the set across the
+        # uvicorn thread and the RX subscriber thread.
+        self._connected_clients: set[WebSocket] = set()
+        self._clients_lock = threading.Lock()
+        self._ws_loop: asyncio.AbstractEventLoop | None = None
 
-    # -------------------------------------------------------------------------
-    # Web Server Routes
-    # -------------------------------------------------------------------------
+        self._setup_routes()
 
     def _setup_routes(self) -> None:
         """Register teleop routes on the embedded web server."""
@@ -149,6 +151,9 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
         @self._web_server.app.websocket("/ws")
         async def websocket_endpoint(ws: WebSocket) -> None:
             await ws.accept()
+            self._ws_loop = asyncio.get_running_loop()
+            with self._clients_lock:
+                self._connected_clients.add(ws)
             logger.info("Quest client connected")
             try:
                 while True:
@@ -163,10 +168,9 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
                 logger.info("Quest client disconnected")
             except Exception:
                 logger.exception("WebSocket error")
-
-    # -------------------------------------------------------------------------
-    # Lifecycle
-    # -------------------------------------------------------------------------
+            finally:
+                with self._clients_lock:
+                    self._connected_clients.discard(ws)
 
     @rpc
     def start(self) -> None:
@@ -180,10 +184,6 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
         self._stop_control_loop()
         self._stop_server()
         super().stop()
-
-    # -------------------------------------------------------------------------
-    # Internal engage/disengage (assumes lock is held)
-    # -------------------------------------------------------------------------
 
     def _engage(self, hand: Hand | None = None) -> bool:
         """Engage a hand. Assumes self._lock is held."""
@@ -217,10 +217,6 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
                 buttons=Buttons.from_controllers(left, right),
             )
 
-    # -------------------------------------------------------------------------
-    # WebSocket Message Decoders
-    # -------------------------------------------------------------------------
-
     @staticmethod
     def _resolve_hand(frame_id: str) -> Hand:
         if frame_id == "left":
@@ -250,10 +246,6 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
             return
         with self._lock:
             self._controllers[hand] = controller
-
-    # -------------------------------------------------------------------------
-    # Embedded Web Server
-    # -------------------------------------------------------------------------
 
     def _start_server(self) -> None:
         """Start the embedded FastAPI server with HTTPS in a daemon thread."""
@@ -333,10 +325,6 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
             if sleep_time > 0:
                 self._stop_event.wait(sleep_time)
 
-    # -------------------------------------------------------------------------
-    # Control Loop Internals
-    # -------------------------------------------------------------------------
-
     def _handle_engage(self) -> None:
         """Check for engage button press and update per-hand engage state.
 
@@ -405,14 +393,3 @@ class QuestTeleopModule(Module[QuestTeleopConfig]):
         """
         buttons = Buttons.from_controllers(left, right)
         self.buttons.publish(buttons)
-
-
-quest_teleop_module = QuestTeleopModule.blueprint
-
-__all__ = [
-    "Hand",
-    "QuestTeleopConfig",
-    "QuestTeleopModule",
-    "QuestTeleopStatus",
-    "quest_teleop_module",
-]
