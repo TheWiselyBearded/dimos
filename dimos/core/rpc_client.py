@@ -12,13 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Protocol
+
+from dimos.core.coordination.python_worker import Actor, MethodCallProxy
 from dimos.core.stream import RemoteStream
-from dimos.core.worker import MethodCallProxy
-from dimos.protocol.rpc import LCMRPC, RPCSpec
+from dimos.protocol.rpc.pubsubrpc import LCMRPC
+from dimos.protocol.rpc.spec import RPCSpec
 from dimos.utils.logging_config import setup_logger
+
+if TYPE_CHECKING:
+    from dimos.core.module import ModuleBase
 
 logger = setup_logger()
 
@@ -66,7 +73,10 @@ class RpcCall:
                 self._stop_rpc_client()
             return None
 
-        result, unsub_fn = self._rpc.call_sync(f"{self._remote_name}/{self._name}", (args, kwargs))  # type: ignore[arg-type]
+        result, unsub_fn = self._rpc.call_sync(
+            f"{self._remote_name}/{self._name}",
+            (args, kwargs),  # type: ignore[arg-type]
+        )
         self._unsub_fns.append(unsub_fn)
         return result
 
@@ -80,15 +90,40 @@ class RpcCall:
         self._stop_rpc_client = None
 
 
+class ModuleProxyProtocol(Protocol):
+    """Protocol for host-side handles to remote modules (worker or Docker)."""
+
+    def build(self) -> None: ...
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def set_transport(self, stream_name: str, transport: Any) -> bool: ...
+
+
 class RPCClient:
-    def __init__(self, actor_instance, actor_class) -> None:  # type: ignore[no-untyped-def]
-        self.rpc = LCMRPC()
+    def __init__(
+        self,
+        actor_instance: Actor | None,
+        actor_class: type[ModuleBase],
+        *,
+        rpc: LCMRPC | None = None,
+    ) -> None:
+        if rpc is None:
+            self.rpc = LCMRPC()
+            self._owns_rpc = True
+            self.rpc.start()
+        else:
+            self.rpc = rpc
+            self._owns_rpc = False
         self.actor_class = actor_class
         self.remote_name = actor_class.__name__
         self.actor_instance = actor_instance
         self.rpcs = actor_class.rpcs.keys()
-        self.rpc.start()
-        self._unsub_fns = []  # type: ignore[var-annotated]
+        self._unsub_fns: list = []  # type: ignore[type-arg]
+
+    @classmethod
+    def remote(cls, actor_class: type[ModuleBase], *, rpc: LCMRPC | None = None) -> RPCClient:
+        """Build an RPCClient with no parent-side Actor (cross-process clients)."""
+        return cls(None, actor_class, rpc=rpc)
 
     def stop_rpc_client(self) -> None:
         for unsub in self._unsub_fns:
@@ -99,7 +134,7 @@ class RPCClient:
 
         self._unsub_fns = []
 
-        if self.rpc:
+        if self.rpc and self._owns_rpc:
             self.rpc.stop()
             self.rpc = None  # type: ignore[assignment]
 
@@ -136,6 +171,13 @@ class RPCClient:
                 self.stop_rpc_client,
             )
 
+        if self.actor_instance is None:
+            raise AttributeError(
+                f"{self.remote_name!r} has no @rpc method named {name!r}; "
+                f"this client was constructed without a parent-side Actor "
+                f"(remote-mode), so non-@rpc attribute access is unavailable."
+            )
+
         # return super().__getattr__(name)
         # Try to avoid recursion by directly accessing attributes that are known
         result = self.actor_instance.__getattr__(name)
@@ -149,6 +191,50 @@ class RPCClient:
         return result
 
 
+class AsyncSpecProxy:
+    """Wraps an RPCClient (or compatible proxy) so methods declared `async def`
+    on the consumer's Spec are exposed as awaitables on the proxy.
+
+    A consumer that types `ref: SomeSpec` where `SomeSpec` declares `async def
+    foo` will see `self.ref.foo(x)` return an awaitable. The underlying RPC call
+    is still synchronous over the wire.  The caller's event loop stays unblocked
+    while the response round-trips.
+
+    It's picklable so `set_module_ref`` can ship it across to the worker process.
+    """
+
+    def __init__(self, inner: Any, async_methods: frozenset[str]) -> None:
+        # Use object.__setattr__ for clarity; we don't override __setattr__
+        # but this mirrors how DisabledModuleProxy guards its internals.
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_async_methods", async_methods)
+
+    def __getattr__(self, name: str) -> Any:
+        inner = object.__getattribute__(self, "_inner")
+        attr = getattr(inner, name)
+        async_methods = object.__getattribute__(self, "_async_methods")
+        if name not in async_methods or not callable(attr):
+            return attr
+
+        def async_call(*args: Any, **kwargs: Any) -> Any:
+            async def _run() -> Any:
+                running = asyncio.get_running_loop()
+                return await running.run_in_executor(None, lambda: attr(*args, **kwargs))
+
+            return _run()
+
+        return async_call
+
+    def __reduce__(self) -> Any:
+        return (
+            AsyncSpecProxy,
+            (
+                object.__getattribute__(self, "_inner"),
+                object.__getattribute__(self, "_async_methods"),
+            ),
+        )
+
+
 if TYPE_CHECKING:
     from dimos.core.module import Module
 
@@ -156,5 +242,6 @@ if TYPE_CHECKING:
     # why? because the RPCClient instance is going to have all the methods of a Module
     # but those methods/attributes are super dynamic, so the type hints can't figure that out
     class ModuleProxy(RPCClient, Module):  # type: ignore[misc]
+        def build(self) -> None: ...
         def start(self) -> None: ...
         def stop(self) -> None: ...

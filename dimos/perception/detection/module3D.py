@@ -15,26 +15,26 @@
 
 from typing import TYPE_CHECKING
 
-from dimos_lcm.foxglove_msgs.ImageAnnotations import (
-    ImageAnnotations,
-)
-from lcm_msgs.foxglove_msgs import SceneUpdate  # type: ignore[import-not-found]
 from reactivex import operators as ops
 from reactivex.observable import Observable
 
-from dimos import spec
 from dimos.agents.annotation import skill
+from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.core import rpc
-from dimos.core.module_coordinator import ModuleCoordinator
 from dimos.core.stream import In, Out
 from dimos.core.transport import LCMTransport
-from dimos.msgs.geometry_msgs import PoseStamped, Quaternion, Transform, Vector3
-from dimos.msgs.sensor_msgs import Image, PointCloud2
-from dimos.msgs.vision_msgs import Detection2DArray
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.vision_msgs.Detection2DArray import Detection2DArray
 from dimos.perception.detection.module2D import Detection2DModule
 from dimos.perception.detection.type.detection2d.imageDetections2D import ImageDetections2D
-from dimos.perception.detection.type.detection3d import Detection3DPC
 from dimos.perception.detection.type.detection3d.imageDetections3DPC import ImageDetections3DPC
+from dimos.perception.detection.type.detection3d.pointcloud import Detection3DPC
+from dimos.spec.perception import Camera, Pointcloud
 from dimos.types.timestamped import align_timestamped
 from dimos.utils.reactive import backpressure
 
@@ -47,9 +47,6 @@ class Detection3DModule(Detection2DModule):
     pointcloud: In[PointCloud2]
 
     detections: Out[Detection2DArray]
-    annotations: Out[ImageAnnotations]
-    scene_update: Out[SceneUpdate]
-
     # just for visualization,
     # emits latest pointclouds of detected objects in a frame
     detected_pointcloud_0: Out[PointCloud2]
@@ -177,9 +174,9 @@ class Detection3DModule(Detection2DModule):
             transform = self.tf.get("camera_optical", pc.frame_id, detections.image.ts, 5.0)
             return self.process_frame(detections, pc, transform)
 
-        self.detection_stream_3d = align_timestamped(
+        self.detection_stream_3d = align_timestamped(  # type: ignore[type-var]
             backpressure(self.detection_stream_2d()),
-            self.pointcloud.observable(),  # type: ignore[no-untyped-call]
+            self.pointcloud.observable(),
             match_tolerance=0.25,
             buffer_size=20.0,
         ).pipe(ops.map(detection2d_to_3d))
@@ -198,13 +195,11 @@ class Detection3DModule(Detection2DModule):
             pointcloud_topic = getattr(self, "detected_pointcloud_" + str(index))
             pointcloud_topic.publish(detection.pointcloud)
 
-        self.scene_update.publish(detections.to_foxglove_scene_update())
-
 
 def deploy(  # type: ignore[no-untyped-def]
     dimos: ModuleCoordinator,
-    lidar: spec.Pointcloud,
-    camera: spec.Camera,
+    lidar: Pointcloud,
+    camera: Camera,
     prefix: str = "/detector3d",
     **kwargs,
 ) -> "ModuleProxy":
@@ -213,9 +208,7 @@ def deploy(  # type: ignore[no-untyped-def]
     detector.image.connect(camera.color_image)
     detector.pointcloud.connect(lidar.pointcloud)
 
-    detector.annotations.transport = LCMTransport(f"{prefix}/annotations", ImageAnnotations)
     detector.detections.transport = LCMTransport(f"{prefix}/detections", Detection2DArray)
-    detector.scene_update.transport = LCMTransport(f"{prefix}/scene_update", SceneUpdate)
 
     detector.detected_image_0.transport = LCMTransport(f"{prefix}/image/0", Image)
     detector.detected_image_1.transport = LCMTransport(f"{prefix}/image/1", Image)
@@ -228,8 +221,3 @@ def deploy(  # type: ignore[no-untyped-def]
     detector.start()
 
     return detector
-
-
-detection3d_module = Detection3DModule.blueprint
-
-__all__ = ["Detection3DModule", "deploy", "detection3d_module"]
