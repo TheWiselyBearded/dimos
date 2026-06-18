@@ -17,23 +17,65 @@
 Available subclasses:
     - ArmTeleopModule: Per-hand press-and-hold engage (X/A hold to track), task name routing
     - TwistTeleopModule: Outputs Twist instead of PoseStamped
-    - VisualizingTeleopModule: Adds Rerun visualization (inherits press-and-hold engage)
+    - VideoArmTeleopModule: ArmTeleopModule + JPEG frames pushed to the Quest over /ws
+    - Go2TeleopModule: Thumbstick → Twist velocity for the Go2 + camera over /ws
 """
 
-from dataclasses import dataclass, field
+import asyncio
 from typing import Any
 
-from dimos.core.stream import Out
-from dimos.msgs.geometry_msgs import PoseStamped, TwistStamped
+from fastapi import WebSocket
+from pydantic import Field
+
+from dimos.core.core import rpc
+from dimos.core.stream import In, Out
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Image import Image
 from dimos.teleop.quest.quest_teleop_module import Hand, QuestTeleopConfig, QuestTeleopModule
 from dimos.teleop.quest.quest_types import Buttons, QuestControllerState
-from dimos.teleop.utils.teleop_visualization import (
-    visualize_buttons,
-    visualize_pose,
-)
+from dimos.utils.logging_config import setup_logger
+
+logger = setup_logger()
 
 
-@dataclass
+async def _ws_send_jpeg(ws: WebSocket, data: bytes) -> None:
+    try:
+        await ws.send_bytes(data)
+    except Exception:
+        # Client closed or write failed — drop the frame; the base /ws
+        # disconnect handler evicts the dead client.
+        pass
+
+
+def _push_jpeg(module: QuestTeleopModule, msg: Image, quality: int) -> None:
+    """JPEG-encode an Image and push it to all of module's connected /ws clients.
+
+    Runs on the RX thread; sends are scheduled on the asyncio loop captured by
+    QuestTeleopModule when the first client connected.
+    """
+    # Snapshot clients under the lock to avoid concurrent set mutation from
+    # the uvicorn thread. Skip the encode entirely if nobody is listening.
+    loop = module._ws_loop
+    if loop is None:
+        return
+    with module._clients_lock:
+        clients = tuple(module._connected_clients)
+    if not clients:
+        return
+
+    try:
+        jpeg = msg.to_jpeg_bytes(quality=quality)
+    except Exception:
+        logger.exception("Failed to encode camera frame")
+        return
+
+    for ws in clients:
+        asyncio.run_coroutine_threadsafe(_ws_send_jpeg(ws, jpeg), loop)
+
+
 class TwistTeleopConfig(QuestTeleopConfig):
     """Configuration for TwistTeleopModule."""
 
@@ -55,11 +97,18 @@ class TwistTeleopModule(QuestTeleopModule):
         - buttons: Buttons (inherited)
     """
 
-    default_config = TwistTeleopConfig
     config: TwistTeleopConfig
 
     left_twist: Out[TwistStamped]
     right_twist: Out[TwistStamped]
+
+    @rpc
+    def start(self) -> None:
+        super().start()
+
+    @rpc
+    def stop(self) -> None:
+        super().stop()
 
     def _publish_msg(self, hand: Hand, output_msg: PoseStamped) -> None:
         """Convert PoseStamped to TwistStamped, apply scaling, and publish."""
@@ -75,7 +124,6 @@ class TwistTeleopModule(QuestTeleopModule):
             self.right_twist.publish(twist)
 
 
-@dataclass
 class ArmTeleopConfig(QuestTeleopConfig):
     """Configuration for ArmTeleopModule.
 
@@ -85,7 +133,7 @@ class ArmTeleopConfig(QuestTeleopConfig):
             hand's commands to the correct TeleopIKTask.
     """
 
-    task_names: dict[str, str] = field(default_factory=dict)
+    task_names: dict[str, str] = Field(default_factory=dict)
 
 
 class ArmTeleopModule(QuestTeleopModule):
@@ -104,11 +152,18 @@ class ArmTeleopModule(QuestTeleopModule):
         - buttons: Buttons (inherited)
     """
 
-    default_config = ArmTeleopConfig
     config: ArmTeleopConfig
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    @rpc
+    def start(self) -> None:
+        super().start()
+
+    @rpc
+    def stop(self) -> None:
+        super().stop()
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
 
         self._task_names: dict[Hand, str] = {
             Hand[k.upper()]: v for k, v in self.config.task_names.items()
@@ -137,14 +192,24 @@ class ArmTeleopModule(QuestTeleopModule):
             left=left.trigger if left is not None else 0.0,
             right=right.trigger if right is not None else 0.0,
         )
-        self.buttons.publish(buttons)
+        self.teleop_buttons.publish(buttons)
 
 
-class VisualizingTeleopModule(ArmTeleopModule):
-    """Quest teleop with Rerun visualization.
+class VideoArmTeleopConfig(ArmTeleopConfig):
+    """Configuration for VideoArmTeleopModule."""
 
-    Adds visualization of controller poses and trigger values to Rerun.
-    Useful for debugging and development.
+    video_jpeg_quality: int = 70
+
+
+class VideoArmTeleopModule(ArmTeleopModule):
+    """ArmTeleopModule + camera frames pushed to the Quest as JPEG over /ws.
+
+    Subscribes to color_image, JPEG-encodes each frame, and broadcasts raw
+    JPEG bytes to every connected /ws client as a binary message. The client
+    decodes via createObjectURL and uploads to a WebGL texture.
+
+    Inputs:
+        - color_image: In[Image] (required — wire to a camera output)
 
     Outputs:
         - left_controller_output: PoseStamped (inherited)
@@ -152,39 +217,69 @@ class VisualizingTeleopModule(ArmTeleopModule):
         - buttons: Buttons (inherited)
     """
 
-    def _get_output_pose(self, hand: Hand) -> PoseStamped | None:
-        """Get output pose and visualize in Rerun."""
-        output_pose = super()._get_output_pose(hand)
+    config: VideoArmTeleopConfig
 
-        if output_pose is not None:
-            current_pose = self._current_poses.get(hand)
-            controller = self._controllers.get(hand)
-            if current_pose is not None:
-                label = "left" if hand == Hand.LEFT else "right"
-                visualize_pose(current_pose, label)
+    color_image: In[Image]
 
-                if controller:
-                    visualize_buttons(
-                        label,
-                        primary=controller.primary,
-                        secondary=controller.secondary,
-                        grip=controller.grip,
-                        trigger=controller.trigger,
-                    )
-        return output_pose
+    async def handle_color_image(self, msg: Image) -> None:
+        _push_jpeg(self, msg, self.config.video_jpeg_quality)
 
 
-# Module blueprints for easy instantiation
-twist_teleop_module = TwistTeleopModule.blueprint
-arm_teleop_module = ArmTeleopModule.blueprint
-visualizing_teleop_module = VisualizingTeleopModule.blueprint
+class Go2TeleopConfig(QuestTeleopConfig):
+    """Configuration for Go2TeleopModule."""
 
-__all__ = [
-    "ArmTeleopConfig",
-    "ArmTeleopModule",
-    "TwistTeleopModule",
-    "VisualizingTeleopModule",
-    "arm_teleop_module",
-    "twist_teleop_module",
-    "visualizing_teleop_module",
-]
+    linear_speed: float = 0.5  # m/s at full stick deflection
+    angular_speed: float = 0.8  # rad/s at full stick deflection
+    deadzone: float = 0.1
+    video_jpeg_quality: int = 70
+
+
+class Go2TeleopModule(QuestTeleopModule):
+    """Quest teleop for the Unitree Go2: thumbstick driving + camera in the headset.
+
+    Velocity is derived from the controller thumbsticks as each Joy message
+    arrives (left stick → forward/strafe, right stick → yaw) and published on
+    cmd_vel for GO2Connection.move. The Go2 camera (color_image) is JPEG-encoded
+    and pushed to the headset over /ws. A deadzone suppresses stick drift.
+
+    Inputs:
+        - color_image: In[Image] (wire to the Go2 camera output)
+
+    Outputs:
+        - cmd_vel: Twist (base velocity command)
+    """
+
+    config: Go2TeleopConfig
+
+    color_image: In[Image]
+    cmd_vel: Out[Twist]
+
+    def _deadzone(self, v: float) -> float:
+        return 0.0 if abs(v) < self.config.deadzone else v
+
+    def _on_joy_bytes(self, data: bytes) -> None:
+        super()._on_joy_bytes(data)
+        with self._lock:
+            left = self._controllers.get(Hand.LEFT)
+            right = self._controllers.get(Hand.RIGHT)
+        twist = Twist()
+        twist.linear = Vector3(0.0, 0.0, 0.0)
+        twist.angular = Vector3(0.0, 0.0, 0.0)
+        if left is not None:
+            twist.linear.x = -self._deadzone(left.thumbstick.y) * self.config.linear_speed
+            twist.linear.y = -self._deadzone(left.thumbstick.x) * self.config.linear_speed
+        if right is not None:
+            twist.angular.z = -self._deadzone(right.thumbstick.x) * self.config.angular_speed
+        self.cmd_vel.publish(twist)
+
+    async def handle_color_image(self, msg: Image) -> None:
+        _push_jpeg(self, msg, self.config.video_jpeg_quality)
+
+    @rpc
+    def stop(self) -> None:
+        # Send one zero Twist so the base halts if teleop dies mid-motion.
+        try:
+            self.cmd_vel.publish(Twist.zero())
+        except Exception:
+            logger.exception("Failed to publish stop Twist")
+        super().stop()

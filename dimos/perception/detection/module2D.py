@@ -11,58 +11,52 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Annotated, Any
 
-from dimos_lcm.foxglove_msgs.ImageAnnotations import (
-    ImageAnnotations,
-)
+from pydantic.experimental.pipeline import validate_as
 from reactivex import operators as ops
 from reactivex.observable import Observable
 from reactivex.subject import Subject
 
-from dimos import spec
+from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.module_coordinator import ModuleCoordinator
 from dimos.core.stream import In, Out
-from dimos.msgs.geometry_msgs import Transform, Vector3
-from dimos.msgs.sensor_msgs import CameraInfo, Image
-from dimos.msgs.sensor_msgs.Image import sharpness_barrier
-from dimos.msgs.vision_msgs import Detection2DArray
-from dimos.perception.detection.detectors import Detector  # type: ignore[attr-defined]
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
+from dimos.msgs.sensor_msgs.Image import Image, sharpness_barrier
+from dimos.msgs.vision_msgs.Detection2DArray import Detection2DArray
+from dimos.perception.detection.detectors.base import Detector
 from dimos.perception.detection.detectors.yolo import Yolo2DDetector
-from dimos.perception.detection.type import Filter2D, ImageDetections2D
+from dimos.perception.detection.type.detection2d.base import Filter2D
+from dimos.perception.detection.type.detection2d.imageDetections2D import ImageDetections2D
+from dimos.spec.perception import Camera
 from dimos.utils.decorators.decorators import simple_mcache
 from dimos.utils.reactive import backpressure
 
 
-@dataclass
 class Config(ModuleConfig):
     max_freq: float = 10
     detector: Callable[[Any], Detector] | None = Yolo2DDetector
     publish_detection_images: bool = True
-    camera_info: CameraInfo = None  # type: ignore[assignment]
-    filter: list[Filter2D] | Filter2D | None = None
-
-    def __post_init__(self) -> None:
-        if self.filter is None:
-            self.filter = []
-        elif not isinstance(self.filter, list):
-            self.filter = [self.filter]
+    camera_info: CameraInfo
+    filter: Annotated[
+        Sequence[Filter2D],
+        validate_as(Sequence[Filter2D] | Filter2D).transform(
+            lambda f: f if isinstance(f, Sequence) else (f,)
+        ),
+    ] = ()
 
 
 class Detection2DModule(Module):
-    default_config = Config
     config: Config
     detector: Detector
 
     color_image: In[Image]
 
     detections: Out[Detection2DArray]
-    annotations: Out[ImageAnnotations]
-
     detected_image_0: Out[Image]
     detected_image_1: Out[Image]
     detected_image_2: Out[Image]
@@ -79,7 +73,8 @@ class Detection2DModule(Module):
         imageDetections = self.detector.process_image(image)
         if not self.config.filter:
             return imageDetections
-        return imageDetections.filter(*self.config.filter)  # type: ignore[misc, return-value]
+        filtered: ImageDetections2D = imageDetections.filter(*self.config.filter)
+        return filtered
 
     @simple_mcache
     def sharp_image_stream(self) -> Observable[Image]:
@@ -142,10 +137,6 @@ class Detection2DModule(Module):
             lambda det: self.detections.publish(det.to_ros_detection2d_array())
         )
 
-        self.detection_stream_2d().subscribe(
-            lambda det: self.annotations.publish(det.to_foxglove_annotations())
-        )
-
         def publish_cropped_images(detections: ImageDetections2D) -> None:
             for index, detection in enumerate(detections[:3]):
                 image_topic = getattr(self, "detected_image_" + str(index))
@@ -156,12 +147,12 @@ class Detection2DModule(Module):
 
     @rpc
     def stop(self) -> None:
-        return super().stop()  # type: ignore[no-any-return]
+        return super().stop()
 
 
 def deploy(  # type: ignore[no-untyped-def]
     dimos: ModuleCoordinator,
-    camera: spec.Camera,
+    camera: Camera,
     prefix: str = "/detector2d",
     **kwargs,
 ) -> Detection2DModule:
@@ -170,7 +161,6 @@ def deploy(  # type: ignore[no-untyped-def]
     detector = Detection2DModule(**kwargs)
     detector.color_image.connect(camera.color_image)
 
-    detector.annotations.transport = LCMTransport(f"{prefix}/annotations", ImageAnnotations)
     detector.detections.transport = LCMTransport(f"{prefix}/detections", Detection2DArray)
 
     detector.detected_image_0.transport = LCMTransport(f"{prefix}/image/0", Image)

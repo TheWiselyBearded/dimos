@@ -24,13 +24,9 @@ from unittest import mock
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Registry tests
-# ---------------------------------------------------------------------------
 from dimos.core import run_registry
 from dimos.core.run_registry import (
     RunEntry,
-    check_port_conflicts,
     cleanup_stale,
     generate_run_id,
     list_runs,
@@ -47,7 +43,6 @@ def tmp_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _make_entry(
     run_id: str = "20260306-120000-test",
     pid: int | None = None,
-    grpc_port: int = 9877,
 ) -> RunEntry:
     return RunEntry(
         run_id=run_id,
@@ -57,7 +52,6 @@ def _make_entry(
         log_dir="/tmp/test-logs",
         cli_args=["test"],
         config_overrides={},
-        grpc_port=grpc_port,
     )
 
 
@@ -72,7 +66,6 @@ class TestRunEntryCRUD:
         assert loaded.run_id == entry.run_id
         assert loaded.pid == entry.pid
         assert loaded.blueprint == entry.blueprint
-        assert loaded.grpc_port == entry.grpc_port
 
         entry.remove()
         assert not entry.registry_path.exists()
@@ -139,82 +132,46 @@ class TestCleanupStale:
         assert not bad.exists()
 
 
-class TestPortConflicts:
-    """Port conflict detection."""
-
-    def test_port_conflict_detection(self, tmp_registry: Path):
-        entry = _make_entry(pid=os.getpid(), grpc_port=9877)
-        entry.save()
-
-        conflict = check_port_conflicts(grpc_port=9877)
-        assert conflict is not None
-        assert conflict.run_id == entry.run_id
-
-    def test_port_conflict_no_false_positive(self, tmp_registry: Path):
-        entry = _make_entry(pid=os.getpid(), grpc_port=8001)
-        entry.save()
-
-        conflict = check_port_conflicts(grpc_port=9877)
-        assert conflict is None
+from dimos.core.coordination.module_coordinator import ModuleCoordinator
 
 
-# ---------------------------------------------------------------------------
-# Health check tests
-# ---------------------------------------------------------------------------
-
-from dimos.core.module_coordinator import ModuleCoordinator
-
-
-def _mock_worker(pid: int | None = 1234, worker_id: int = 0):
-    """Create a mock Worker with a controllable pid."""
-    w = mock.MagicMock()
-    w.worker_id = worker_id
-    w.pid = pid
-    return w
-
-
-def _mock_coordinator(workers: list | None = None) -> ModuleCoordinator:
-    """Create a ModuleCoordinator with mocked internals and controllable workers."""
+def _mock_coordinator(manager_health: list[bool] | None = None) -> ModuleCoordinator:
+    """Create a ModuleCoordinator with mocked managers and controllable health."""
     coord = mock.MagicMock(spec=ModuleCoordinator)
     # Bind the real health_check method so it runs actual logic
     coord.health_check = ModuleCoordinator.health_check.__get__(coord)
-    if workers is not None:
-        coord.workers = workers
-        coord.n_workers = len(workers)
+    if manager_health is not None:
+        managers: dict[str, mock.MagicMock] = {}
+        for i, healthy in enumerate(manager_health):
+            m = mock.MagicMock()
+            m.health_check.return_value = healthy
+            managers[str(i)] = m
+        coord._managers = managers
     else:
-        coord.workers = []
-        coord.n_workers = 0
+        coord._managers = {}
     return coord
 
 
 class TestHealthCheck:
-    """health_check verifies all workers are alive after synchronous build."""
+    """health_check delegates to managers and returns all() of their results."""
 
     def test_all_healthy(self):
-        workers = [_mock_worker(pid=os.getpid(), worker_id=i) for i in range(3)]
-        coord = _mock_coordinator(workers)
+        coord = _mock_coordinator([True, True])
         assert coord.health_check() is True
 
-    def test_dead_worker(self):
-        dead = _mock_worker(pid=None, worker_id=0)
-        coord = _mock_coordinator([dead])
+    def test_one_unhealthy(self):
+        coord = _mock_coordinator([True, False])
         assert coord.health_check() is False
 
-    def test_no_workers(self):
-        coord = _mock_coordinator(workers=[])
+    def test_no_managers(self):
+        coord = _mock_coordinator([])
+        # all([]) is True — no managers means nothing to fail
+        assert coord.health_check() is True
+
+    def test_all_unhealthy(self):
+        coord = _mock_coordinator([False, False])
         assert coord.health_check() is False
 
-    def test_partial_death(self):
-        w1 = _mock_worker(pid=os.getpid(), worker_id=0)
-        w2 = _mock_worker(pid=os.getpid(), worker_id=1)
-        w3 = _mock_worker(pid=None, worker_id=2)
-        coord = _mock_coordinator([w1, w2, w3])
-        assert coord.health_check() is False
-
-
-# ---------------------------------------------------------------------------
-# Daemon tests
-# ---------------------------------------------------------------------------
 
 from dimos.core.daemon import daemonize, install_signal_handlers
 
@@ -275,11 +232,6 @@ class TestSignalHandler:
         assert not entry.registry_path.exists()
 
 
-# ---------------------------------------------------------------------------
-# dimos status tests
-# ---------------------------------------------------------------------------
-
-
 class TestStatusCommand:
     """Tests for `dimos status` CLI command."""
 
@@ -325,11 +277,6 @@ class TestStatusCommand:
 
         entries = list_runs(alive_only=True)
         assert len(entries) == 0
-
-
-# ---------------------------------------------------------------------------
-# dimos stop tests
-# ---------------------------------------------------------------------------
 
 
 class TestStopCommand:

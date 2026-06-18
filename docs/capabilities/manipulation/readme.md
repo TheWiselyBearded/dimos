@@ -4,11 +4,18 @@ Motion planning and teleoperation for robotic manipulators. Uses Drake for physi
 
 ## Quick Start
 
+Recent addition: the A-750 keyboard teleop blueprint is now available via:
+
+```bash
+dimos run keyboard-teleop-a750
+```
+
 ### Keyboard Teleop (single command)
 
 Each blueprint launches the full stack — keyboard UI, mock controller, IK solver, and Drake visualization:
 
 ```bash
+dimos run keyboard-teleop-a750    # A-750 6-DOF
 dimos run keyboard-teleop-piper   # Piper 6-DOF
 dimos run keyboard-teleop-xarm6   # XArm6 6-DOF
 dimos run keyboard-teleop-xarm7   # XArm7 7-DOF
@@ -39,13 +46,30 @@ dimos run coordinator-mock
 dimos run xarm7-planner-coordinator
 ```
 
+Select a non-default IK backend with nested module config overrides:
+
+```bash
+dimos run xarm7-planner-coordinator \
+  -o manipulationmodule.kinematics.backend=pink \
+  -o manipulationmodule.kinematics.max_iterations=100 \
+  -o manipulationmodule.kinematics.dt=0.02
+```
+
+For blueprints that instantiate `PickAndPlaceModule`, use the corresponding
+module prefix:
+
+```bash
+dimos run xarm-perception-sim \
+  -o pickandplacemodule.kinematics.backend=pink
+```
+
 Then use the IPython client:
 
 ```bash
 python -m dimos.manipulation.planning.examples.manipulation_client
 ```
 
-```python
+```python skip
 joints()                # Get current joints
 plan([0.1] * 7)         # Plan to target
 preview()               # Preview in Meshcat
@@ -55,11 +79,8 @@ execute()               # Execute via coordinator
 ### Perception + Agent
 
 ```bash
-# Terminal 1: Coordinator with real xarm7
-dimos run coordinator-xarm7
-
-# Terminal 2: Perception + manipulation + LLM agent
-dimos run xarm-perception-agent
+# Coordinator + perception + manipulation + LLM agent (single command)
+XARM7_IP=<ip> dimos run coordinator-xarm7 xarm-perception-agent
 ```
 
 ## Architecture
@@ -78,10 +99,16 @@ KeyboardTeleopModule ──→ ControlCoordinator ──→ ManipulationModule
 - **ControlCoordinator** — 100Hz control loop with mock or real hardware adapters
 - **ManipulationModule** — Drake physics, Meshcat viz, RRT motion planning, obstacle management
 
+Internally, planning code depends on `WorldSpec` for world, collision, and
+kinematics behavior. Meshcat preview and publishing are exposed separately
+through `VisualizationSpec`, so non-visual planning paths do not require a
+visualization backend.
+
 ## Blueprints
 
 | Blueprint | Description |
 |-----------|-------------|
+| `keyboard-teleop-a750` | A750 6-DOF keyboard teleop with Drake viz |
 | `keyboard-teleop-piper` | Piper 6-DOF keyboard teleop with Drake viz |
 | `keyboard-teleop-xarm6` | XArm6 6-DOF keyboard teleop with Drake viz |
 | `keyboard-teleop-xarm7` | XArm7 7-DOF keyboard teleop with Drake viz |
@@ -90,11 +117,13 @@ KeyboardTeleopModule ──→ ControlCoordinator ──→ ManipulationModule
 | `dual-xarm6-planner` | Dual XArm6 planning |
 | `xarm-perception` | XArm7 + RealSense camera for perception |
 | `xarm-perception-agent` | XArm7 perception + LLM agent |
+| `xarm-perception-sim` | XArm7 simulation perception stack |
 
 ## Supported Robots
 
 | Robot | DOF | Teleop | Planning | Perception |
 |-------|-----|--------|----------|------------|
+| [A-750](/docs/capabilities/manipulation/a750.md) | 6 | Y | Y | — |
 | Piper | 6 | Y | Y | — |
 | XArm6 | 6 | Y | Y | — |
 | XArm7 | 7 | Y | Y | Y |
@@ -109,6 +138,7 @@ KeyboardTeleopModule ──→ ControlCoordinator ──→ ManipulationModule
 |------|-------------|
 | [`manipulation_module.py`](/dimos/manipulation/manipulation_module.py) | Main module (RPC interface, state machine) |
 | [`manipulation/blueprints.py`](/dimos/manipulation/blueprints.py) | Planner and perception blueprints |
+| [`robot/manipulators/a750/blueprints.py`](/dimos/robot/manipulators/a750/blueprints.py) | A-750 keyboard teleop blueprint |
 | [`robot/manipulators/piper/blueprints.py`](/dimos/robot/manipulators/piper/blueprints.py) | Piper keyboard teleop blueprint |
 | [`robot/manipulators/xarm/blueprints.py`](/dimos/robot/manipulators/xarm/blueprints.py) | XArm keyboard teleop blueprints |
 | [`teleop/keyboard/keyboard_teleop_module.py`](/dimos/teleop/keyboard/keyboard_teleop_module.py) | Keyboard teleop module |
