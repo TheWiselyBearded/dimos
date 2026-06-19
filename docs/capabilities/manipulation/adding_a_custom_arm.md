@@ -66,7 +66,7 @@ Below is a complete annotated adapter. Implement each method by wrapping your ve
 | Position         | meters   |
 | Force            | Newtons  |
 
-```python
+```python skip
 """YourArm adapter — implements ManipulatorAdapter protocol.
 
 SDK Units: <describe your SDK's native units here>
@@ -116,9 +116,6 @@ class YourArmAdapter:
         self._sdk: YourArmSDK | None = None
         self._control_mode: ControlMode = ControlMode.POSITION
 
-    # =========================================================================
-    # Connection
-    # =========================================================================
 
     def connect(self) -> bool:
         """Connect to hardware. Returns True on success."""
@@ -144,9 +141,14 @@ class YourArmAdapter:
         """Check if connected."""
         return self._sdk is not None and self._sdk.is_alive()
 
-    # =========================================================================
-    # Info
-    # =========================================================================
+    def activate(self) -> bool:
+        """Prepare hardware for commanded motion after connect()."""
+        return self.write_enable(True)
+
+    def deactivate(self) -> bool:
+        """Gracefully stop commanded motion before disconnect()."""
+        return self.write_stop()
+
 
     def get_info(self) -> ManipulatorInfo:
         """Get manipulator info (vendor, model, DOF)."""
@@ -173,9 +175,6 @@ class YourArmAdapter:
             velocity_max=[math.pi] * self._dof,          # rad/s
         )
 
-    # =========================================================================
-    # Control Mode
-    # =========================================================================
 
     def set_control_mode(self, mode: ControlMode) -> bool:
         """Set control mode.
@@ -206,9 +205,6 @@ class YourArmAdapter:
         """Get current control mode."""
         return self._control_mode
 
-    # =========================================================================
-    # State Reading
-    # =========================================================================
 
     def read_joint_positions(self) -> list[float]:
         """Read current joint positions in radians.
@@ -262,9 +258,6 @@ class YourArmAdapter:
             return 0, ""
         return code, f"YourArm error {code}"
 
-    # =========================================================================
-    # Motion Control (Joint Space)
-    # =========================================================================
 
     def write_joint_positions(
         self,
@@ -300,9 +293,6 @@ class YourArmAdapter:
             return False
         return self._sdk.emergency_stop()
 
-    # =========================================================================
-    # Servo Control
-    # =========================================================================
 
     def write_enable(self, enable: bool) -> bool:
         """Enable or disable servos."""
@@ -322,10 +312,6 @@ class YourArmAdapter:
             return False
         return self._sdk.clear_errors()
 
-    # =========================================================================
-    # Optional: Cartesian Control
-    # Return None/False if not supported by your arm.
-    # =========================================================================
 
     def read_cartesian_position(self) -> dict[str, float] | None:
         """Read end-effector pose.
@@ -343,9 +329,6 @@ class YourArmAdapter:
         """Command end-effector pose. Return False if not supported."""
         return False
 
-    # =========================================================================
-    # Optional: Gripper
-    # =========================================================================
 
     def read_gripper_position(self) -> float | None:
         """Read gripper position in meters. Return None if no gripper."""
@@ -355,9 +338,6 @@ class YourArmAdapter:
         """Command gripper position in meters. Return False if no gripper."""
         return False
 
-    # =========================================================================
-    # Optional: Force/Torque Sensor
-    # =========================================================================
 
     def read_force_torque(self) -> list[float] | None:
         """Read F/T sensor data [fx, fy, fz, tx, ty, tz]. None if no sensor."""
@@ -378,7 +358,8 @@ __all__ = ["YourArmAdapter"]
 - **Unsupported features** — Return `None` for reads and `False` for writes. Never raise exceptions for optional features.
 - **Velocity/effort feedback** — If your SDK doesn't provide these, return zeros. The coordinator handles this gracefully.
 - **Lazy SDK import** — If the vendor SDK is an optional dependency, you can import it inside `connect()` instead of at module level (see Piper adapter for this pattern):
-  ```python
+
+  ```py
   def connect(self) -> bool:
       try:
           from yourarm_sdk import YourArmSDK
@@ -393,7 +374,7 @@ __all__ = ["YourArmAdapter"]
 
 ### \_\_init\_\_.py
 
-```python
+```python skip
 """YourArm manipulator hardware adapter.
 
 Usage:
@@ -420,7 +401,7 @@ This means **no manual registration is needed** — just having the `register()`
 
 You can verify discovery works:
 
-```python
+```python skip
 from dimos.hardware.manipulators.registry import adapter_registry
 print(adapter_registry.available())  # Should include "yourarm"
 ```
@@ -447,7 +428,7 @@ dimos/robot/
 
 Create `dimos/robot/yourarm/blueprints.py` with your coordinator and (optionally) planning blueprints:
 
-```python
+```python skip
 """Blueprints for YourArm robot.
 
 Usage:
@@ -466,16 +447,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from dimos.control.components import HardwareComponent, HardwareType, make_joints
-from dimos.control.coordinator import TaskConfig, control_coordinator
-from dimos.core.transport import LCMTransport
-from dimos.msgs.sensor_msgs import JointState
+from dimos.control.coordinator import ControlCoordinator, TaskConfig
 
-# =============================================================================
-# Coordinator Blueprints
-# =============================================================================
 
 # YourArm (6-DOF) — real hardware
-coordinator_yourarm = control_coordinator(
+coordinator_yourarm = ControlCoordinator.blueprint(
     tick_rate=100.0,                    # Control loop frequency (Hz)
     publish_joint_state=True,           # Publish aggregated joint state
     joint_state_frame_id="coordinator",
@@ -497,10 +473,6 @@ coordinator_yourarm = control_coordinator(
             priority=10,                              # Higher priority wins arbitration
         ),
     ],
-).transports(
-    {
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-    }
 )
 
 
@@ -527,11 +499,13 @@ If you want motion planning (collision-free trajectories via Drake), you need a 
 
 Place your URDF/xacro files under LFS data so they can be resolved via `LfsPath`. `LfsPath` is a `Path` subclass that lazily downloads LFS data on first access — this avoids downloading at import time when the blueprint module is loaded.
 
-```python
+```python skip
 from dimos.utils.data import LfsPath
 from dimos.manipulation.manipulation_module import manipulation_module
 from dimos.manipulation.planning.spec import RobotModelConfig
-from dimos.msgs.geometry_msgs import PoseStamped, Quaternion, Vector3
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
 # LfsPath defers download until the path is actually accessed
 _YOURARM_URDF_PATH = LfsPath("yourarm_description/urdf/yourarm.urdf")
@@ -540,6 +514,7 @@ _YOURARM_PACKAGE_PATH = LfsPath("yourarm_description")
 
 def _make_base_pose(x=0.0, y=0.0, z=0.0) -> PoseStamped:
     return PoseStamped(
+        frame_id="map",
         position=Vector3(x=x, y=y, z=z),
         orientation=Quaternion(0.0, 0.0, 0.0, 1.0),
     )
@@ -547,7 +522,7 @@ def _make_base_pose(x=0.0, y=0.0, z=0.0) -> PoseStamped:
 
 ### 4b. Create a robot model config helper
 
-```python
+```python skip
 def _make_yourarm_config(
     name: str = "arm",
     y_offset: float = 0.0,
@@ -568,7 +543,7 @@ def _make_yourarm_config(
 
     return RobotModelConfig(
         name=name,
-        urdf_path=_YOURARM_URDF_PATH,
+        model_path=_YOURARM_URDF_PATH,
         base_pose=_make_base_pose(y=y_offset),
         joint_names=joint_names,
         end_effector_link="link6",      # Last link in your URDF's kinematic chain
@@ -588,27 +563,23 @@ def _make_yourarm_config(
 
 Add this to your `dimos/robot/yourarm/blueprints.py` alongside the coordinator blueprint:
 
-```python
-# =============================================================================
-# Planner Blueprints (requires URDF)
-# =============================================================================
+```python skip
 
 yourarm_planner = manipulation_module(
     robots=[_make_yourarm_config("arm", joint_prefix="arm_", coordinator_task="traj_arm")],
     planning_timeout=10.0,
     enable_viz=True,
-).transports(
-    {
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-    }
 )
+# The planner's `coordinator_joint_state` input auto-connects to the
+# ControlCoordinator's output on the default `/coordinator_joint_state`
+# topic, so no `.transports(...)` override is needed.
 ```
 
 ### Key config fields
 
 | Field | Description |
 |-------|-------------|
-| `urdf_path` | Path to `.urdf` or `.xacro` file |
+| `model_path` | Path to `.urdf` or `.xacro` file |
 | `joint_names` | Ordered list of controlled joints (must match URDF) |
 | `end_effector_link` | Link to use as the end-effector for IK |
 | `base_link` | Root link of the robot model |
@@ -635,7 +606,7 @@ The blueprint registry in `dimos/robot/all_blueprints.py` is **auto-generated** 
 
 ### Verify adapter registration
 
-```python
+```python skip
 from dimos.hardware.manipulators.registry import adapter_registry
 
 # Check your adapter shows up
@@ -649,7 +620,7 @@ adapter = adapter_registry.create("yourarm", address="192.168.1.100", dof=6)
 
 You can test coordinator logic without hardware by using `unittest.mock`:
 
-```python
+```python skip
 import pytest
 from unittest.mock import MagicMock
 from dimos.hardware.manipulators.spec import ManipulatorAdapter
@@ -662,6 +633,8 @@ def mock_adapter():
     adapter.read_joint_velocities.return_value = [0.0] * 6
     adapter.read_joint_efforts.return_value = [0.0] * 6
     adapter.write_joint_positions.return_value = True
+    adapter.activate.return_value = True
+    adapter.deactivate.return_value = True
     adapter.read_enabled.return_value = True
     adapter.is_connected.return_value = True
     return adapter
@@ -676,20 +649,23 @@ def test_write_positions(mock_adapter):
 
 ### Integration test with coordinator
 
-```python
-from dimos.control.blueprints import coordinator_mock
+```python skip
+from dimos.control.blueprints.basic import coordinator_mock
+from dimos.core.coordination.module_coordinator import ModuleCoordinator
 
 # Build and start coordinator with mock hardware
-coordinator = coordinator_mock.build()
+coordinator = ModuleCoordinator.build(coordinator_mock)
 coordinator.start()
 
 # Your adapter is tested through the same coordinator interface
 # Just swap adapter_type="mock" to adapter_type="yourarm" in a blueprint
+
+coordinator.stop()
 ```
 
 ### Test the real adapter standalone
 
-```python
+```python skip
 from dimos.hardware.manipulators.yourarm import YourArmAdapter
 
 adapter = YourArmAdapter(address="192.168.1.100", dof=6)
@@ -701,12 +677,12 @@ positions = adapter.read_joint_positions()
 assert len(positions) == 6
 print(f"Joint positions (rad): {positions}")
 
-# Enable and move
-adapter.write_enable(True)
+# Activate and move
+adapter.activate()
 adapter.write_joint_positions([0.0] * 6)
 
 # Cleanup
-adapter.write_stop()
+adapter.deactivate()
 adapter.disconnect()
 ```
 

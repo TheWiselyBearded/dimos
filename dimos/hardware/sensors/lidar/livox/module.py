@@ -16,21 +16,26 @@
 
 Usage::
     from dimos.hardware.sensors.lidar.livox.module import Mid360
-    from dimos.core.blueprints import autoconnect
+    from dimos.core.coordination.blueprints import autoconnect
 
-    autoconnect(
-        Mid360.blueprint(host_ip="192.168.1.5"),
+    from dimos.core.coordination.module_coordinator import ModuleCoordinator
+    ModuleCoordinator.build(autoconnect(
+        Mid360.blueprint(),  # host_ip auto-detected; set lidar_ip if not the factory default
         SomeConsumer.blueprint(),
-    ).build().loop()
+    )).loop()
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
 from typing import TYPE_CHECKING
 
+from pydantic import Field
+
+from dimos.core.core import rpc
 from dimos.core.native_module import NativeModule, NativeModuleConfig
-from dimos.core.stream import Out  # noqa: TC001
+from dimos.core.stream import Out
+from dimos.hardware.sensors.lidar.livox.net import resolve_host_ip
 from dimos.hardware.sensors.lidar.livox.ports import (
     SDK_CMD_DATA_PORT,
     SDK_HOST_CMD_DATA_PORT,
@@ -43,21 +48,19 @@ from dimos.hardware.sensors.lidar.livox.ports import (
     SDK_POINT_DATA_PORT,
     SDK_PUSH_MSG_PORT,
 )
-from dimos.msgs.sensor_msgs.Imu import Imu  # noqa: TC001
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2  # noqa: TC001
+from dimos.msgs.sensor_msgs.Imu import Imu
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.spec import perception
 
 
-@dataclass(kw_only=True)
 class Mid360Config(NativeModuleConfig):
-    """Config for the C++ Mid-360 native module."""
-
     cwd: str | None = "cpp"
     executable: str = "result/bin/mid360_native"
     build_command: str | None = "nix build .#mid360_native"
-
-    host_ip: str = "192.168.1.5"
-    lidar_ip: str = "192.168.1.155"
+    host_ip: str | None = Field(default_factory=lambda: os.environ.get("DIMOS_MID360_HOST_IP"))
+    lidar_ip: str = Field(
+        default_factory=lambda: os.environ.get("DIMOS_MID360_LIDAR_IP", "192.168.1.155")
+    )
     frequency: float = 10.0
     enable_imu: bool = True
     frame_id: str = "lidar_link"
@@ -77,27 +80,24 @@ class Mid360Config(NativeModuleConfig):
 
 
 class Mid360(NativeModule, perception.Lidar, perception.IMU):
-    """Livox Mid-360 LiDAR module backed by a native C++ binary.
-
-    Ports:
-        lidar (Out[PointCloud2]): Point cloud frames at configured frequency.
-        imu (Out[Imu]): IMU data at ~200 Hz (if enabled).
-    """
-
     config: Mid360Config
-    default_config = Mid360Config
 
     lidar: Out[PointCloud2]
     imu: Out[Imu]
 
+    @rpc
+    def start(self) -> None:
+        # Auto-derive host_ip from a local NIC on the lidar's subnet (shared with
+        # Point-LIO) when the configured value isn't one of our IPs.
+        self.config.host_ip = resolve_host_ip(
+            self.config.lidar_ip, self.config.host_ip, label="Mid360"
+        )
+        super().start()
 
-mid360_module = Mid360.blueprint
+    @rpc
+    def stop(self) -> None:
+        super().stop()
 
-__all__ = [
-    "Mid360",
-    "Mid360Config",
-    "mid360_module",
-]
 
 # Verify protocol port compliance (mypy will flag missing ports)
 if TYPE_CHECKING:
