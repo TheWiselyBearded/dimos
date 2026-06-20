@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from datetime import datetime
 from functools import cache
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 from dimos.constants import DIMOS_PROJECT_ROOT
 from dimos.utils.logging_config import setup_logger
@@ -52,7 +55,7 @@ def _get_user_data_dir() -> Path:
 
 
 @cache
-def _get_repo_root() -> Path:
+def get_project_root() -> Path:
     # Check if running from git repo
     if (DIMOS_PROJECT_ROOT / ".git").exists():
         return DIMOS_PROJECT_ROOT
@@ -107,8 +110,43 @@ def _get_repo_root() -> Path:
 @cache
 def get_data_dir(extra_path: str | None = None) -> Path:
     if extra_path:
-        return _get_repo_root() / "data" / extra_path
-    return _get_repo_root() / "data"
+        return get_project_root() / "data" / extra_path
+    return get_project_root() / "data"
+
+
+def resolve_named_path(name: str | Path, suffix: str = "") -> Path:
+    s = str(name)
+    p = Path(s)
+    if p.is_absolute() or p.exists():
+        return p
+    if (DIMOS_PROJECT_ROOT / p).exists():
+        return DIMOS_PROJECT_ROOT / p
+    if suffix and not s.endswith(suffix):
+        p = Path(s + suffix)
+        if p.is_absolute() or p.exists():
+            return p
+        if (DIMOS_PROJECT_ROOT / p).exists():
+            return DIMOS_PROJECT_ROOT / p
+    return get_data(p.name)
+
+
+def backup_file(path: str | Path, keep_last: int = 3) -> Path | None:
+    path = Path(path)
+    if not path.exists():
+        return None
+
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup = path.with_name(f"{path.stem}.{ts}{path.suffix}")
+    path.rename(backup)
+
+    pattern = re.compile(rf"^{re.escape(path.stem)}\.\d{{14}}{re.escape(path.suffix)}$")
+    backups = sorted(
+        p for p in path.parent.glob(f"{path.stem}.*{path.suffix}") if pattern.match(p.name)
+    )
+    for old in backups[:-keep_last] if keep_last > 0 else backups:
+        old.unlink()
+
+    return backup if backup.exists() else None
 
 
 @cache
@@ -154,23 +192,30 @@ def _is_lfs_pointer_file(file_path: Path) -> bool:
         return False
 
 
-def _lfs_pull(file_path: Path, repo_root: Path) -> None:
-    try:
-        relative_path = file_path.relative_to(repo_root)
+def _lfs_pull(file_path: Path, repo_root: Path, *, retries: int = 2) -> None:
+    relative_path = file_path.relative_to(repo_root)
 
-        env = os.environ.copy()
-        env["GIT_LFS_FORCE_PROGRESS"] = "1"
+    env = os.environ.copy()
+    env["GIT_LFS_FORCE_PROGRESS"] = "1"
 
-        subprocess.run(
-            ["git", "lfs", "pull", "--include", str(relative_path)],
-            cwd=repo_root,
-            check=True,
-            env=env,
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to pull LFS file {file_path}: {e}")
+    last_err: subprocess.CalledProcessError | None = None
+    for attempt in range(1, retries + 2):  # retries + 1 total attempts
+        try:
+            subprocess.run(
+                ["git", "lfs", "pull", "--include", str(relative_path)],
+                cwd=repo_root,
+                check=True,
+                env=env,
+            )
+            return
+        except subprocess.CalledProcessError as e:
+            last_err = e
+            if attempt <= retries:
+                time.sleep(attempt)  # 1s, 2s backoff
 
-    return None
+    raise RuntimeError(
+        f"Failed to pull LFS file {file_path} after {retries + 1} attempts: {last_err}"
+    )
 
 
 def _decompress_archive(filename: str | Path) -> Path:
@@ -186,7 +231,7 @@ def _pull_lfs_archive(filename: str | Path) -> Path:
     _check_git_lfs_available()
 
     # Find repository root
-    repo_root = _get_repo_root()
+    repo_root = get_project_root()
 
     # Construct path to test data file
     file_path = _get_lfs_dir() / (str(filename) + ".tar.gz")
@@ -288,7 +333,7 @@ class LfsPath(type(Path())):  # type: ignore[misc]
     def __new__(cls, filename: str | Path) -> "LfsPath":
         # Create instance with a placeholder path to satisfy Path.__new__
         # We use "." as a dummy path that always exists
-        instance: LfsPath = super().__new__(cls, ".")  # type: ignore[call-arg]
+        instance: LfsPath = super().__new__(cls, ".")
         # Store the actual filename as an instance attribute
         object.__setattr__(instance, "_lfs_filename", filename)
         object.__setattr__(instance, "_lfs_resolved_cache", None)
@@ -327,10 +372,11 @@ class LfsPath(type(Path())):  # type: ignore[misc]
         """Return filesystem path, downloading from LFS if needed."""
         return str(self._ensure_downloaded())
 
-    def __truediv__(self, other: object) -> Path:
-        """Path division operator - returns resolved path."""
-        return self._ensure_downloaded() / other  # type: ignore[operator, return-value]
+    def __truediv__(self, other: object) -> "LfsPath":
+        """Path division operator - returns a new lazy LfsPath (no download)."""
+        filename = object.__getattribute__(self, "_lfs_filename")
+        return LfsPath(f"{filename}/{other}")
 
     def __rtruediv__(self, other: object) -> Path:
         """Reverse path division operator."""
-        return other / self._ensure_downloaded()  # type: ignore[operator, return-value]
+        return other / self._ensure_downloaded()  # type: ignore[operator]

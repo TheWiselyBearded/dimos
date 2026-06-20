@@ -13,55 +13,89 @@
 # limitations under the License.
 
 import os
+from typing import Any
 
 from dimos_lcm.std_msgs import Bool, String
 from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
-from dimos.core.global_config import GlobalConfig, global_config
-from dimos.core.module import Module
+from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
-from dimos.msgs.geometry_msgs import PointStamped, PoseStamped, Twist
-from dimos.msgs.nav_msgs import OccupancyGrid, Path
+from dimos.msgs.geometry_msgs.PointStamped import PointStamped
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
+from dimos.msgs.nav_msgs.Odometry import Odometry
+from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.base import NavigationInterface, NavigationState
 from dimos.navigation.replanning_a_star.global_planner import GlobalPlanner
+from dimos.utils.logging_config import setup_logger
+
+logger = setup_logger()
+
+
+class ReplanningAStarPlannerConfig(ModuleConfig):
+    robot_width: float | None = None
+    robot_rotation_diameter: float | None = None
 
 
 class ReplanningAStarPlanner(Module, NavigationInterface):
+    config: ReplanningAStarPlannerConfig
+
     odom: In[PoseStamped]  # TODO: Use TF.
+    odometry: In[Odometry]
     global_costmap: In[OccupancyGrid]
     goal_request: In[PoseStamped]
     clicked_point: In[PointStamped]
     target: In[PoseStamped]
+    stop_movement: In[Bool]
 
     goal_reached: Out[Bool]
     navigation_state: Out[String]  # TODO: set it
-    cmd_vel: Out[Twist]
+    nav_cmd_vel: Out[Twist]
     path: Out[Path]
     navigation_costmap: Out[OccupancyGrid]
 
     _planner: GlobalPlanner
-    _global_config: GlobalConfig
 
-    def __init__(self, cfg: GlobalConfig = global_config) -> None:
-        super().__init__()
-        self._global_config = cfg
-        self._planner = GlobalPlanner(self._global_config)
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        overrides = {
+            name: value
+            for name, value in (
+                ("robot_width", self.config.robot_width),
+                ("robot_rotation_diameter", self.config.robot_rotation_diameter),
+            )
+            if value is not None
+        }
+        effective_global_config = (
+            self.config.g.model_copy(update=overrides) if overrides else self.config.g
+        )
+        self._planner = GlobalPlanner(effective_global_config)
 
     @rpc
     def start(self) -> None:
         super().start()
 
-        self._disposables.add(Disposable(self.odom.subscribe(self._planner.handle_odom)))
-        self._disposables.add(
+        self.register_disposable(Disposable(self.odom.subscribe(self._planner.handle_odom)))
+        self.register_disposable(
+            Disposable(
+                self.odometry.subscribe(
+                    lambda msg: self._planner.handle_odom(msg.to_pose_stamped())
+                )
+            )
+        )
+        self.register_disposable(
             Disposable(self.global_costmap.subscribe(self._planner.handle_global_costmap))
         )
-        self._disposables.add(
+        self.register_disposable(
             Disposable(self.goal_request.subscribe(self._planner.handle_goal_request))
         )
-        self._disposables.add(Disposable(self.target.subscribe(self._planner.handle_goal_request)))
+        self.register_disposable(
+            Disposable(self.target.subscribe(self._planner.handle_goal_request))
+        )
 
-        self._disposables.add(
+        self.register_disposable(
             Disposable(
                 self.clicked_point.subscribe(
                     lambda pt: self._planner.handle_goal_request(pt.to_pose_stamped())
@@ -69,14 +103,19 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
             )
         )
 
-        self._disposables.add(self._planner.path.subscribe(self.path.publish))
+        if self.stop_movement.transport is not None:
+            self.register_disposable(
+                Disposable(self.stop_movement.subscribe(self._on_stop_movement))
+            )
 
-        self._disposables.add(self._planner.cmd_vel.subscribe(self.cmd_vel.publish))
+        self.register_disposable(self._planner.path.subscribe(self.path.publish))
 
-        self._disposables.add(self._planner.goal_reached.subscribe(self.goal_reached.publish))
+        self.register_disposable(self._planner.cmd_vel.subscribe(self.nav_cmd_vel.publish))
+
+        self.register_disposable(self._planner.goal_reached.subscribe(self.goal_reached.publish))
 
         if "DEBUG_NAVIGATION" in os.environ:
-            self._disposables.add(
+            self.register_disposable(
                 self._planner.navigation_costmap.subscribe(self.navigation_costmap.publish)
             )
 
@@ -88,6 +127,10 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
         self._planner.stop()
 
         super().stop()
+
+    def _on_stop_movement(self, msg: Bool) -> None:
+        if msg.data:
+            self.cancel_goal()
 
     @rpc
     def set_goal(self, goal: PoseStamped) -> bool:
@@ -107,7 +150,14 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
         self._planner.cancel_goal()
         return True
 
+    @rpc
+    def set_replanning_enabled(self, enabled: bool) -> None:
+        self._planner.set_replanning_enabled(enabled)
 
-replanning_a_star_planner = ReplanningAStarPlanner.blueprint
+    @rpc
+    def set_safe_goal_clearance(self, clearance: float) -> None:
+        self._planner.set_safe_goal_clearance(clearance)
 
-__all__ = ["ReplanningAStarPlanner", "replanning_a_star_planner"]
+    @rpc
+    def reset_safe_goal_clearance(self) -> None:
+        self._planner.reset_safe_goal_clearance()

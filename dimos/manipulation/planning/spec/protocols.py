@@ -29,15 +29,16 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from dimos.manipulation.planning.spec.config import RobotModelConfig
-    from dimos.manipulation.planning.spec.types import (
+    from dimos.manipulation.planning.spec.models import (
         IKResult,
         JointPath,
         Obstacle,
         PlanningResult,
+        PlanningSceneInfo,
         WorldRobotID,
     )
-    from dimos.msgs.geometry_msgs import PoseStamped
-    from dimos.msgs.sensor_msgs import JointState
+    from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+    from dimos.msgs.sensor_msgs.JointState import JointState
 
 
 @runtime_checkable
@@ -92,6 +93,10 @@ class WorldSpec(Protocol):
 
     def clear_obstacles(self) -> None:
         """Remove all obstacles."""
+        ...
+
+    def get_obstacles(self) -> list[Obstacle]:
+        """Get all obstacles currently in the world."""
         ...
 
     # Lifecycle
@@ -165,13 +170,36 @@ class WorldSpec(Protocol):
         """Get end-effector Jacobian (6 x n_joints)."""
         ...
 
-    # Visualization (optional)
+
+@runtime_checkable
+class VisualizationSpec(Protocol):
+    """Protocol for optional manipulation planning visualization.
+
+    Visualization backends expose inspection and preview behavior without being part of
+    the world/collision/kinematics contract.
+
+    Implementations may render, ignore, or map semantic events to their native
+    visualization affordances.
+    """
+
+    def initialize_scene(self, scene: PlanningSceneInfo) -> None:
+        """Receive stable planning-scene metadata after world startup."""
+        ...
+
     def get_visualization_url(self) -> str | None:
         """Get visualization URL if enabled."""
         ...
 
     def publish_visualization(self, ctx: Any | None = None) -> None:
         """Publish current state to visualization."""
+        ...
+
+    def show_preview(self, robot_id: WorldRobotID) -> None:
+        """Show the preview representation for a robot."""
+        ...
+
+    def hide_preview(self, robot_id: WorldRobotID) -> None:
+        """Hide the preview representation for a robot."""
         ...
 
     def animate_path(self, robot_id: WorldRobotID, path: JointPath, duration: float = 3.0) -> None:
