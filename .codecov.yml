@@ -1,0 +1,24 @@
+codecov:
+  branch: main
+  notify:
+    manual_trigger: true
+
+coverage:
+  status:
+    project: true
+    patch: true
+
+# Carry forward self-hosted, as these are not run on external PRs.
+flag_management:
+  individual_flags:
+    - name: SelfHosted-Linux
+      carryforward: true
+    - name: SelfHosted-macos
+      carryforward: true
+    - name: SelfHosted-Large
+      carryforward: true
+
+comment:
+  layout: "newheader, diff, flags, components, files"
+  require_head: false
+  require_base: false

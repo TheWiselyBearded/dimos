@@ -14,10 +14,11 @@
 import pytest
 
 
+@pytest.mark.self_hosted
 def test_person_ros_confidence() -> None:
     """Test that Detection2DPerson preserves confidence when converting to ROS format."""
 
-    from dimos.msgs.sensor_msgs import Image
+    from dimos.msgs.sensor_msgs.Image import Image
     from dimos.perception.detection.detectors.person.yolo import YoloPersonDetector
     from dimos.perception.detection.type.detection2d.person import Detection2DPerson
     from dimos.utils.data import get_data

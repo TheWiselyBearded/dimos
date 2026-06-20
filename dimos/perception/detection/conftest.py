@@ -15,30 +15,29 @@
 from collections.abc import Callable, Generator
 import functools
 from typing import TypedDict
+from unittest import mock
 
-from dimos_lcm.foxglove_msgs.ImageAnnotations import ImageAnnotations
-from dimos_lcm.foxglove_msgs.SceneUpdate import SceneUpdate
 from dimos_lcm.visualization_msgs.MarkerArray import MarkerArray
 import pytest
 
 from dimos.core.transport import LCMTransport
-from dimos.msgs.geometry_msgs import Transform
-from dimos.msgs.sensor_msgs import CameraInfo, Image, PointCloud2
-from dimos.msgs.vision_msgs import Detection2DArray
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
+from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.vision_msgs.Detection2DArray import Detection2DArray
 from dimos.perception.detection.module2D import Detection2DModule
 from dimos.perception.detection.module3D import Detection3DModule
 from dimos.perception.detection.moduleDB import ObjectDBModule
-from dimos.perception.detection.type import (
-    Detection2D,
-    Detection3DPC,
-    ImageDetections2D,
-    ImageDetections3DPC,
-)
-from dimos.protocol.tf import TF
+from dimos.perception.detection.type.detection2d.base import Detection2D
+from dimos.perception.detection.type.detection2d.imageDetections2D import ImageDetections2D
+from dimos.perception.detection.type.detection3d.imageDetections3DPC import ImageDetections3DPC
+from dimos.perception.detection.type.detection3d.pointcloud import Detection3DPC
+from dimos.protocol.tf.tf import TF
 from dimos.robot.unitree.go2 import connection
 from dimos.robot.unitree.type.odometry import Odometry
 from dimos.utils.data import get_data
-from dimos.utils.testing import TimedSensorReplay
+from dimos.utils.testing.legacy_pickle import LegacyPickleStore
 
 
 class Moment(TypedDict, total=False):
@@ -48,10 +47,8 @@ class Moment(TypedDict, total=False):
     camera_info: CameraInfo
     transforms: list[Transform]
     tf: TF
-    annotations: ImageAnnotations | None
     detections: ImageDetections3DPC | None
     markers: MarkerArray | None
-    scene_update: SceneUpdate | None
 
 
 class Moment2D(Moment):
@@ -79,12 +76,12 @@ def get_moment(tf):
         data_dir = "unitree_go2_lidar_corrected"
         get_data(data_dir)
 
-        lidar_frame_result = TimedSensorReplay(f"{data_dir}/lidar").find_closest_seek(seek)
+        lidar_frame_result = LegacyPickleStore(f"{data_dir}/lidar").find_closest_seek(seek)
         if lidar_frame_result is None:
             raise ValueError("No lidar frame found")
         lidar_frame: PointCloud2 = lidar_frame_result
 
-        image_frame = TimedSensorReplay(
+        image_frame = LegacyPickleStore(
             f"{data_dir}/video",
         ).find_closest(lidar_frame.ts)
 
@@ -93,7 +90,7 @@ def get_moment(tf):
 
         image_frame.frame_id = "camera_optical"
 
-        odom_frame = TimedSensorReplay(f"{data_dir}/odom", autocast=Odometry.from_msg).find_closest(
+        odom_frame = LegacyPickleStore(f"{data_dir}/odom", autocast=Odometry.from_msg).find_closest(
             lidar_frame.ts
         )
 
@@ -122,28 +119,12 @@ def publish_moment():
     def publisher(moment: Moment | Moment2D | Moment3D) -> None:
         detections2d_val = moment.get("detections2d")
         if detections2d_val:
-            # 2d annotations
-            annotations: LCMTransport[ImageAnnotations] = LCMTransport(
-                "/annotations", ImageAnnotations
-            )
-            assert isinstance(detections2d_val, ImageDetections2D)
-            annotations.publish(detections2d_val.to_foxglove_annotations())
-
             detections: LCMTransport[Detection2DArray] = LCMTransport(
                 "/detections", Detection2DArray
             )
+            assert isinstance(detections2d_val, ImageDetections2D)
             detections.publish(detections2d_val.to_ros_detection2d_array())
-
-            annotations.lcm.stop()
             detections.lcm.stop()
-
-        detections3dpc_val = moment.get("detections3dpc")
-        if detections3dpc_val:
-            scene_update: LCMTransport[SceneUpdate] = LCMTransport("/scene_update", SceneUpdate)
-            # 3d scene update
-            assert isinstance(detections3dpc_val, ImageDetections3DPC)
-            scene_update.publish(detections3dpc_val.to_foxglove_scene_update())
-            scene_update.lcm.stop()
 
         lidar_frame = moment.get("lidar_frame")
         if lidar_frame:
@@ -202,9 +183,10 @@ def detection3dpc(detections3dpc) -> Detection3DPC:
 
 @pytest.fixture(scope="session")
 def get_moment_2d(get_moment) -> Generator[Callable[[], Moment2D], None, None]:
-    from dimos.perception.detection.detectors import Yolo2DDetector
+    from dimos.perception.detection.detectors.yolo import Yolo2DDetector
 
-    module = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"))
+    c = mock.create_autospec(CameraInfo, spec_set=True, instance=True)
+    module = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"), camera_info=c)
 
     @functools.lru_cache(maxsize=1)
     def moment_provider(**kwargs) -> Moment2D:
@@ -260,9 +242,10 @@ def get_moment_3dpc(get_moment_2d) -> Generator[Callable[[], Moment3D], None, No
 @pytest.fixture(scope="session")
 def object_db_module(get_moment):
     """Create and populate an ObjectDBModule with detections from multiple frames."""
-    from dimos.perception.detection.detectors import Yolo2DDetector
+    from dimos.perception.detection.detectors.yolo import Yolo2DDetector
 
-    module2d = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"))
+    c = mock.create_autospec(CameraInfo, spec_set=True, instance=True)
+    module2d = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"), camera_info=c)
     module3d = Detection3DModule(camera_info=connection._camera_info_static())
     moduleDB = ObjectDBModule(camera_info=connection._camera_info_static())
 
