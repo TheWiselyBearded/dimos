@@ -927,7 +927,28 @@ def main() -> None:
                      help="confidence decay per frame the object is in-frustum but undetected. "
                           "Object is deleted when confidence reaches 0")
 
+    viz = parser.add_argument_group("visualization backend")
+    viz.add_argument("--viz", choices=["foxglove", "rerun", "both"], default="foxglove",
+                     help="foxglove = publish LCM topics for the dimos foxglove bridge (default). "
+                          "rerun = log to a Rerun viewer via each message's to_rerun(). "
+                          "both = do both at once.")
+    viz.add_argument("--rerun-save", type=Path, default=None,
+                     help="with --viz rerun/both: write the Rerun stream to this .rrd file "
+                          "instead of spawning a viewer (headless).")
+    viz.add_argument("--rerun-connect", action="store_true",
+                     help="with --viz rerun/both: connect to an already-running Rerun "
+                          "viewer (rerun --serve) instead of spawning a new one.")
+
     args = parser.parse_args()
+
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from viz_backend import RerunViz, DualPublisher, backends_for
+
+    _lcm_on, _rerun_on = backends_for(args.viz)
+    rerun = RerunViz(_rerun_on, app_id="dimos_iphone_spatial",
+                     save_path=args.rerun_save, connect=args.rerun_connect)
 
     from dimos.core.transport import LCMTransport
     from dimos.msgs.sensor_msgs.Image import Image
@@ -1039,19 +1060,35 @@ def main() -> None:
     _external_pose_warned = False
     _last_external_c2w: np.ndarray | None = None
 
-    img_topic = LCMTransport("/color_image", Image)
-    ann_topic = LCMTransport("/annotations", ImageAnnotations)
-    cam_info_topic = LCMTransport("/camera_info", CameraInfo)
-    depth_cam_info_topic = LCMTransport("/depth_camera_info", CameraInfo)
-    depth_topic = LCMTransport("/depth", Image)
-    points_topic = LCMTransport("/points_frame", PointCloud2)
-    map_topic = LCMTransport("/map", PointCloud2)
-    acc_cloud_topic = LCMTransport("/accumulated_cloud", PointCloud2) if args.accumulate_cloud else None
-    obj_cloud_topic = LCMTransport("/object_clouds", PointCloud2)
-    scene_topic = LCMTransport("/scene_update", SceneUpdate)
-    tf_topic = LCMTransport("/tf", TFMessage)
+    _lcm_factory = LCMTransport if _lcm_on else None
 
-    print("\n[main] publishing. Foxglove: ws://localhost:8765")
+    def _topic(name, mtype, *, rr_log=True, to_rerun_kwargs=None):
+        # rr_log=False marks Foxglove-only topics (no to_rerun equivalent);
+        # tracked objects are shown in Rerun as native boxes (log_object_boxes).
+        return DualPublisher(name, mtype, lcm_factory=_lcm_factory,
+                             rerun=(rerun if rr_log else None),
+                             to_rerun_kwargs=to_rerun_kwargs)
+
+    _cloud_kw = {"mode": "points"}
+    img_topic = _topic("/color_image", Image)
+    ann_topic = _topic("/annotations", ImageAnnotations, rr_log=False)
+    cam_info_topic = _topic("/camera_info", CameraInfo)
+    depth_cam_info_topic = _topic("/depth_camera_info", CameraInfo)
+    depth_topic = _topic("/depth", Image)
+    points_topic = _topic("/points_frame", PointCloud2, to_rerun_kwargs=_cloud_kw)
+    map_topic = _topic("/map", PointCloud2, to_rerun_kwargs=_cloud_kw)
+    acc_cloud_topic = _topic("/accumulated_cloud", PointCloud2, to_rerun_kwargs=_cloud_kw) if args.accumulate_cloud else None
+    obj_cloud_topic = _topic("/object_clouds", PointCloud2, to_rerun_kwargs=_cloud_kw)
+    scene_topic = _topic("/scene_update", SceneUpdate, rr_log=False)
+    tf_topic = _topic("/tf", TFMessage)
+
+    _viz_targets = []
+    if _lcm_on:
+        _viz_targets.append("Foxglove (LCM bridge: ws://localhost:8765)")
+    if _rerun_on:
+        _viz_targets.append("Rerun (save -> %s)" % args.rerun_save if args.rerun_save
+                            else "Rerun (viewer)")
+    print("\n[main] publishing. viz=%s -> %s" % (args.viz, ", ".join(_viz_targets)))
     print("  3D panel (frame=world): /map  /object_clouds  /scene_update  /tf  /points_frame")
     if acc_cloud_topic is not None:
         print("  accumulate-cloud ON: /accumulated_cloud "
@@ -1217,6 +1254,7 @@ def main() -> None:
             if spatial_mem is not None:
                 spatial_mem.maybe_store(small_bgr, c2w, ts)
 
+            rerun.set_time(ts)
             img_topic.publish(color_msg)
             cam_info_topic.publish(cam_info)
             depth_cam_info_topic.publish(cam_info)
@@ -1244,6 +1282,7 @@ def main() -> None:
                 if all_objs:
                     obj_cloud_topic.publish(aggregate_pointclouds(all_objs))
                     scene_topic.publish(build_scene_update_for_objects(all_objs, ts))
+                    rerun.log_object_boxes("world/objects", all_objs)
                 if OBJECT_LIST_SINK is not None:
                     cam_pos = c2w[:3, 3].astype(np.float64)
                     listing = []

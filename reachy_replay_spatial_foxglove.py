@@ -806,6 +806,18 @@ def main() -> None:
     parser.add_argument("--no-loop", action="store_true",
                         help="exit after one pass through the recording (default: loop)")
 
+    # Visualization backend (forwarded to the dimos spatial pipeline)
+    parser.add_argument(
+        "--viz", choices=["foxglove", "rerun", "both"], default="foxglove",
+        help="foxglove = dimos LCM bridge (default). rerun = Rerun viewer via "
+             "to_rerun(). both = both at once. (forwarded to the dimos script)",
+    )
+    parser.add_argument("--rerun-save", default=None,
+                        help="with --viz rerun/both: write the Rerun stream to this .rrd "
+                             "file instead of spawning a viewer (headless)")
+    parser.add_argument("--rerun-connect", action="store_true",
+                        help="with --viz rerun/both: connect to an already-running Rerun viewer")
+
     # Sidecar
     parser.add_argument(
         "--sidecar-port", type=int,
@@ -927,6 +939,13 @@ def main() -> None:
     if args.no_loop:
         dimos_argv.append("--no-loop")
 
+    # Forward visualization backend selection to the dimos pipeline
+    dimos_argv += ["--viz", args.viz]
+    if args.rerun_save is not None:
+        dimos_argv += ["--rerun-save", str(args.rerun_save)]
+    if args.rerun_connect:
+        dimos_argv.append("--rerun-connect")
+
     # Forward map-I/O flags
     if args.save_map is not None:
         dimos_argv += ["--save-map", str(args.save_map)]
@@ -955,10 +974,18 @@ def main() -> None:
 
     sys.argv = dimos_argv
     print(f"[replay] dimos argv: {' '.join(dimos_argv)}\n")
-    print("[replay] Foxglove:")
-    print("   primary (dimos LCM bridge):  ws://localhost:8765")
+    print("[replay] visualization:")
+    if args.viz in ("foxglove", "both"):
+        print("   spatial scene (Foxglove via dimos LCM bridge):  ws://localhost:8765")
+    if args.viz in ("rerun", "both"):
+        if args.rerun_save:
+            print(f"   spatial scene (Rerun):  save -> {args.rerun_save}")
+        else:
+            print("   spatial scene (Rerun):  viewer window")
     if sidecar is not None:
-        print(f"   sidecar (reachy streams):    ws://localhost:{args.sidecar_port}")
+        # Reachy telemetry (IMU/joints/head_pose/DOA) is a JSON Foxglove server and
+        # stays on Foxglove regardless of --viz; those streams aren't dimos to_rerun() msgs.
+        print(f"   reachy telemetry (Foxglove sidecar, always):    ws://localhost:{args.sidecar_port}")
     print("Ctrl+C to exit.\n")
 
     # 5. Run dimos pipeline.
