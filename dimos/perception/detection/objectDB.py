@@ -55,6 +55,7 @@ class ObjectDB:
         confidence_init: float = 0.5,
         confidence_step_up: float = 0.10,
         confidence_step_down: float = 0.05,
+        center_from_accumulated_cloud: bool = True,
     ) -> None:
         self._distance_threshold = distance_threshold
         self._min_detections = min_detections_for_permanent
@@ -66,6 +67,10 @@ class ObjectDB:
         self._confidence_init = confidence_init
         self._confidence_step_up = confidence_step_up
         self._confidence_step_down = confidence_step_down
+        # True: object center = accumulated-cloud centroid (stable, for static-scene
+        # mapping / spatial memory). False: center = latest detection (tracks motion,
+        # for live navigation around moving objects). See Object.update_object.
+        self._center_from_accumulated_cloud = center_from_accumulated_cloud
 
         # Internal storage - keyed by object_id
         self._pending_objects: dict[str, Object] = {}
@@ -376,7 +381,7 @@ class ObjectDB:
         return obj
 
     def _update_existing(self, existing: Object, obj: Object, now: float) -> None:
-        existing.update_object(obj)
+        existing.update_object(obj, center_from_accumulated_cloud=self._center_from_accumulated_cloud)
         existing.ts = obj.ts or now
         if obj.track_id >= 0:
             self._track_id_map[obj.track_id] = existing.object_id

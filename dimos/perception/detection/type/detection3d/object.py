@@ -59,7 +59,7 @@ class Object(Detection3D):
     mask: np.ndarray[Any, np.dtype[np.uint8]] | None = None
     detections_count: int = 1
 
-    def update_object(self, other: Object) -> None:
+    def update_object(self, other: Object, center_from_accumulated_cloud: bool = True) -> None:
         """Update this object with data from another detection.
 
         Accumulates pointclouds by transforming the new pointcloud to world frame
@@ -68,6 +68,13 @@ class Object(Detection3D):
 
         Args:
             other: Another Object instance with newer detection data.
+            center_from_accumulated_cloud: If True (default), derive ``center`` from
+                the centroid of the accumulated cloud — a stable, self-refining
+                position that suits static-scene mapping / spatial memory. If False,
+                use the latest detection's center, which tracks motion frame-to-frame
+                and is better for live navigation around moving objects. The cloud is
+                accumulated for visualization either way, and ``size``/``pose`` always
+                come from the latest detection.
         """
         # Accumulate pointclouds if transforms are available. Both clouds are
         # already expressed in the world frame (from_2d_to_list applied the camera
@@ -82,8 +89,13 @@ class Object(Detection3D):
             except Exception:
                 pass
             self.pointcloud = merged
-            pc_center = self.pointcloud.center
-            self.center = Vector3(pc_center.x, pc_center.y, pc_center.z)
+            if center_from_accumulated_cloud:
+                pc_center = self.pointcloud.center
+                self.center = Vector3(pc_center.x, pc_center.y, pc_center.z)
+            else:
+                # Latest-detection geometry: cloud still accumulates for viz, but
+                # the reported center tracks the newest observation.
+                self.center = other.center
         else:
             # No transform available, just replace
             self.pointcloud = other.pointcloud
