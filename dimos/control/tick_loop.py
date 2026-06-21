@@ -31,6 +31,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.control.task import (
     ControlTask,
     CoordinatorState,
@@ -38,7 +39,7 @@ from dimos.control.task import (
     JointStateSnapshot,
     ResourceClaim,
 )
-from dimos.msgs.sensor_msgs import JointState
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from dimos.control.components import HardwareId, JointName, TaskName
     from dimos.control.hardware_interface import ConnectedHardware
     from dimos.hardware.manipulators.spec import ControlMode
+    from dimos.hardware.whole_body.spec import IMUState
 
 logger = setup_logger()
 
@@ -144,7 +146,7 @@ class TickLoop:
         """Stop the tick loop."""
         self._stop_event.set()
         if self._tick_thread and self._tick_thread.is_alive():
-            self._tick_thread.join(timeout=2.0)
+            self._tick_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
         logger.info("TickLoop stopped")
 
     def _loop(self) -> None:
@@ -172,26 +174,20 @@ class TickLoop:
         self._last_tick_time = t_now
         self._tick_count += 1
 
-        # === PHASE 1: READ ALL HARDWARE ===
         joint_states = self._read_all_hardware()
-        state = CoordinatorState(joints=joint_states, t_now=t_now, dt=dt)
+        imu_states = self._read_all_imu()
+        state = CoordinatorState(joints=joint_states, imu=imu_states, t_now=t_now, dt=dt)
 
-        # === PHASE 2: COMPUTE ALL ACTIVE TASKS ===
         commands = self._compute_all_tasks(state)
 
-        # === PHASE 3: ARBITRATE (with mode validation) ===
         joint_commands, preemptions = self._arbitrate(commands)
 
-        # === PHASE 4: NOTIFY PREEMPTIONS (once per task) ===
         self._notify_preemptions(preemptions)
 
-        # === PHASE 5: ROUTE TO HARDWARE ===
         hw_commands = self._route_to_hardware(joint_commands)
 
-        # === PHASE 6: WRITE TO HARDWARE ===
         self._write_all_hardware(hw_commands)
 
-        # === PHASE 7: PUBLISH AGGREGATED STATE ===
         if self._publish_callback:
             self._publish_joint_state(joint_states)
 
@@ -227,6 +223,29 @@ class TickLoop:
             joint_efforts=joint_efforts,
             timestamp=time.time(),
         )
+
+    def _read_all_imu(self) -> dict[str, IMUState]:
+        """Poll IMU from every whole-body hardware in the pool.
+
+        Tasks read this through ``CoordinatorState.imu[hardware_id]``
+        instead of reaching into adapters directly. Hardware without
+        IMU support is absent from the dict.
+        """
+        from dimos.control.hardware_interface import ConnectedWholeBody
+
+        out: dict[str, IMUState] = {}
+        with self._hardware_lock:
+            for hw_id, hw in self._hardware.items():
+                if not isinstance(hw, ConnectedWholeBody):
+                    continue
+                read_imu = getattr(hw.adapter, "read_imu", None)
+                if not callable(read_imu):
+                    continue
+                try:
+                    out[hw_id] = read_imu()
+                except Exception as e:
+                    logger.error(f"Failed to read IMU from {hw_id}: {e}")
+        return out
 
     def _compute_all_tasks(
         self, state: CoordinatorState
@@ -395,6 +414,3 @@ class TickLoop:
         )
         if self._publish_callback:
             self._publish_callback(msg)
-
-
-__all__ = ["TickLoop"]

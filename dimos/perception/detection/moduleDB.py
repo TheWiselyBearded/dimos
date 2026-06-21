@@ -13,24 +13,23 @@
 # limitations under the License.
 from collections.abc import Callable
 from copy import copy
-import threading
 import time
 from typing import Any
 
-from dimos_lcm.foxglove_msgs.ImageAnnotations import (
-    ImageAnnotations,
-)
-from lcm_msgs.foxglove_msgs import SceneUpdate  # type: ignore[import-not-found]
 from reactivex.observable import Observable
 
 from dimos.core.core import rpc
 from dimos.core.stream import In, Out
-from dimos.msgs.geometry_msgs import PoseStamped, Quaternion, Transform, Vector3
-from dimos.msgs.sensor_msgs import Image, PointCloud2
-from dimos.msgs.vision_msgs import Detection2DArray
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.vision_msgs.Detection2DArray import Detection2DArray
 from dimos.perception.detection.module3D import Detection3DModule
-from dimos.perception.detection.type.detection3d import Detection3DPC
 from dimos.perception.detection.type.detection3d.imageDetections3DPC import ImageDetections3DPC
+from dimos.perception.detection.type.detection3d.pointcloud import Detection3DPC
 from dimos.perception.detection.type.utils import TableStr
 
 
@@ -148,8 +147,6 @@ class ObjectDBModule(Detection3DModule, TableStr):
     pointcloud: In[PointCloud2]
 
     detections: Out[Detection2DArray]
-    annotations: Out[ImageAnnotations]
-
     detected_pointcloud_0: Out[PointCloud2]
     detected_pointcloud_1: Out[PointCloud2]
     detected_pointcloud_2: Out[PointCloud2]
@@ -157,8 +154,6 @@ class ObjectDBModule(Detection3DModule, TableStr):
     detected_image_0: Out[Image]
     detected_image_1: Out[Image]
     detected_image_2: Out[Image]
-
-    scene_update: Out[SceneUpdate]
 
     target: Out[PoseStamped]
 
@@ -171,14 +166,6 @@ class ObjectDBModule(Detection3DModule, TableStr):
         def update_objects(imageDetections: ImageDetections3DPC) -> None:
             for detection in imageDetections.detections:
                 self.add_detection(detection)
-
-        def scene_thread() -> None:
-            while True:
-                scene_update = self.to_foxglove_scene_update()
-                self.scene_update.publish(scene_update)
-                time.sleep(1.0)
-
-        threading.Thread(target=scene_thread, daemon=True).start()
 
         self.detection_stream_3d.subscribe(update_objects)
 
@@ -281,34 +268,5 @@ class ObjectDBModule(Detection3DModule, TableStr):
         """Go to object by id."""
         return self.objects.get(object_id, None)
 
-    def to_foxglove_scene_update(self) -> "SceneUpdate":
-        """Convert all detections to a Foxglove SceneUpdate message.
-
-        Returns:
-            SceneUpdate containing SceneEntity objects for all detections
-        """
-
-        # Create SceneUpdate message with all detections
-        scene_update = SceneUpdate()
-        scene_update.deletions_length = 0
-        scene_update.deletions = []
-        scene_update.entities = []
-
-        for obj in self.objects:
-            try:
-                scene_update.entities.append(
-                    obj.to_foxglove_scene_entity(entity_id=f"{obj.name}_{obj.track_id}")  # type: ignore[attr-defined]
-                )
-            except Exception:
-                pass
-
-        scene_update.entities_length = len(scene_update.entities)
-        return scene_update
-
     def __len__(self) -> int:
         return len(self.objects.values())
-
-
-detection_db_module = ObjectDBModule.blueprint
-
-__all__ = ["ObjectDBModule", "detection_db_module"]

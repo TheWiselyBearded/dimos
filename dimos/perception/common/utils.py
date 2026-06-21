@@ -24,19 +24,28 @@ from dimos_lcm.vision_msgs import (
 )
 import numpy as np
 import torch
-import yaml  # type: ignore[import-untyped]
+import yaml
 
+<<<<<<< HEAD
 from dimos.msgs.geometry_msgs import Pose, Quaternion, Vector3
 from dimos.msgs.sensor_msgs import CameraInfo as DIMOSCameraInfo
 from dimos.msgs.sensor_msgs import Image
 from dimos.msgs.sensor_msgs.Image import ImageFormat
 from dimos.msgs.std_msgs import Header
+=======
+from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.std_msgs.Header import Header
+>>>>>>> upstream/main
 from dimos.types.manipulation import ObjectData
 from dimos.types.vector import Vector
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
+<<<<<<< HEAD
 __all__ = [
     "BoundingBox2D",
     "CameraInfo",
@@ -80,10 +89,12 @@ __all__ = [
     "torch",
     "yaml",
 ]
+=======
+>>>>>>> upstream/main
 
 # Optional CuPy support
 try:  # pragma: no cover - optional dependency
-    import cupy as cp  # type: ignore[import-not-found, import-untyped]
+    import cupy as cp  # type: ignore[import-not-found,import-untyped]
 
     _HAS_CUDA = True
 except Exception:  # pragma: no cover - optional dependency
@@ -165,7 +176,7 @@ def load_camera_info(yaml_path: str, frame_id: str = "camera_link") -> CameraInf
     )
 
 
-def load_camera_info_opencv(yaml_path: str) -> tuple[np.ndarray, np.ndarray]:  # type: ignore[type-arg]
+def load_camera_info_opencv(yaml_path: str) -> tuple[np.ndarray, np.ndarray]:
     """
     Load ROS-style camera_info YAML file and convert to OpenCV camera matrix and distortion coefficients.
 
@@ -194,12 +205,17 @@ def load_camera_info_opencv(yaml_path: str) -> tuple[np.ndarray, np.ndarray]:  #
     return K, dist
 
 
+<<<<<<< HEAD
 def create_undistortion_maps(
     camera_info: DIMOSCameraInfo,
     balance: float = 0.0,
     new_size: tuple[int, int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, DIMOSCameraInfo]:  # type: ignore[type-arg]
     """Precompute undistortion remap tables for a given camera.
+=======
+def rectify_image(image: Image, camera_matrix: np.ndarray, dist_coeffs: np.ndarray) -> Image:
+    """CPU rectification using OpenCV. Preserves backend by caller.
+>>>>>>> upstream/main
 
     Supports both standard (plumb_bob) and fisheye (equidistant/kannala_brandt4)
     distortion models. The returned maps can be reused across frames via
@@ -369,9 +385,9 @@ def project_3d_points_to_2d_cuda(
 
 
 def project_3d_points_to_2d_cpu(
-    points_3d: np.ndarray,  # type: ignore[type-arg]
-    camera_intrinsics: list[float] | np.ndarray,  # type: ignore[type-arg]
-) -> np.ndarray:  # type: ignore[type-arg]
+    points_3d: np.ndarray,
+    camera_intrinsics: list[float] | np.ndarray,
+) -> np.ndarray:
     pts = np.asarray(points_3d, dtype=np.float64)
     valid_mask = pts[:, 2] > 0
     if not np.any(valid_mask):
@@ -388,9 +404,9 @@ def project_3d_points_to_2d_cpu(
 
 
 def project_3d_points_to_2d(
-    points_3d: Union[np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
-    camera_intrinsics: Union[list[float], np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
-) -> Union[np.ndarray, "cp.ndarray"]:  # type: ignore[type-arg]
+    points_3d: Union[np.ndarray, "cp.ndarray"],
+    camera_intrinsics: Union[list[float], np.ndarray, "cp.ndarray"],
+) -> Union[np.ndarray, "cp.ndarray"]:
     """
     Project 3D points to 2D image coordinates using camera intrinsics.
 
@@ -441,10 +457,10 @@ def project_2d_points_to_3d_cuda(
 
 
 def project_2d_points_to_3d_cpu(
-    points_2d: np.ndarray,  # type: ignore[type-arg]
-    depth_values: np.ndarray,  # type: ignore[type-arg]
-    camera_intrinsics: list[float] | np.ndarray,  # type: ignore[type-arg]
-) -> np.ndarray:  # type: ignore[type-arg]
+    points_2d: np.ndarray,
+    depth_values: np.ndarray,
+    camera_intrinsics: list[float] | np.ndarray,
+) -> np.ndarray:
     pts = np.asarray(points_2d, dtype=np.float64)
     depths = np.asarray(depth_values, dtype=np.float64)
     valid_mask = depths > 0
@@ -467,10 +483,10 @@ def project_2d_points_to_3d_cpu(
 
 
 def project_2d_points_to_3d(
-    points_2d: Union[np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
-    depth_values: Union[np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
-    camera_intrinsics: Union[list[float], np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
-) -> Union[np.ndarray, "cp.ndarray"]:  # type: ignore[type-arg]
+    points_2d: Union[np.ndarray, "cp.ndarray"],
+    depth_values: Union[np.ndarray, "cp.ndarray"],
+    camera_intrinsics: Union[list[float], np.ndarray, "cp.ndarray"],
+) -> Union[np.ndarray, "cp.ndarray"]:
     """
     Project 2D image points to 3D coordinates using depth values and camera intrinsics.
 
@@ -502,10 +518,10 @@ def project_2d_points_to_3d(
 
 
 def colorize_depth(
-    depth_img: Union[np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
+    depth_img: Union[np.ndarray, "cp.ndarray"],
     max_depth: float = 5.0,
     overlay_stats: bool = True,
-) -> Union[np.ndarray, "cp.ndarray"] | None:  # type: ignore[type-arg]
+) -> Union[np.ndarray, "cp.ndarray"] | None:
     """
     Normalize and colorize depth image using COLORMAP_JET with optional statistics overlay.
 
@@ -643,7 +659,7 @@ def colorize_depth(
 
 
 def draw_bounding_box(
-    image: Union[np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
+    image: Union[np.ndarray, "cp.ndarray"],
     bbox: list[float],
     color: tuple[int, int, int] = (0, 255, 0),
     thickness: int = 2,
@@ -651,7 +667,7 @@ def draw_bounding_box(
     confidence: float | None = None,
     object_id: int | None = None,
     font_scale: float = 0.6,
-) -> Union[np.ndarray, "cp.ndarray"]:  # type: ignore[type-arg]
+) -> Union[np.ndarray, "cp.ndarray"]:
     """
     Draw a bounding box with optional label on an image.
 
@@ -710,13 +726,13 @@ def draw_bounding_box(
 
 
 def draw_segmentation_mask(
-    image: Union[np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
-    mask: Union[np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
+    image: Union[np.ndarray, "cp.ndarray"],
+    mask: Union[np.ndarray, "cp.ndarray"],
     color: tuple[int, int, int] = (0, 200, 200),
     alpha: float = 0.5,
     draw_contours: bool = True,
     contour_thickness: int = 2,
-) -> Union[np.ndarray, "cp.ndarray"]:  # type: ignore[type-arg]
+) -> Union[np.ndarray, "cp.ndarray"]:
     """
     Draw segmentation mask overlay on an image.
 
@@ -756,13 +772,13 @@ def draw_segmentation_mask(
 
 
 def draw_object_detection_visualization(
-    image: Union[np.ndarray, "cp.ndarray"],  # type: ignore[type-arg]
+    image: Union[np.ndarray, "cp.ndarray"],
     objects: list[ObjectData],
     draw_masks: bool = False,
     bbox_color: tuple[int, int, int] = (0, 255, 0),
     mask_color: tuple[int, int, int] = (0, 200, 200),
     font_scale: float = 0.6,
-) -> Union[np.ndarray, "cp.ndarray"]:  # type: ignore[type-arg]
+) -> Union[np.ndarray, "cp.ndarray"]:
     """
     Create object detection visualization with bounding boxes and optional masks.
 
@@ -821,7 +837,7 @@ def detection_results_to_object_data(
     class_ids: list[int],
     confidences: list[float],
     names: list[str],
-    masks: list[np.ndarray] | None = None,  # type: ignore[type-arg]
+    masks: list[np.ndarray] | None = None,
     source: str = "detection",
 ) -> list[ObjectData]:
     """
@@ -864,8 +880,8 @@ def detection_results_to_object_data(
             if masks and i < len(masks)
             else None,
             # Initialize 3D properties (will be populated by point cloud processing)
-            "position": Vector(0, 0, 0),  # type: ignore[arg-type]
-            "rotation": Vector(0, 0, 0),  # type: ignore[arg-type]
+            "position": Vector(0, 0, 0),
+            "rotation": Vector(0, 0, 0),
             "size": {
                 "width": 0.0,
                 "height": 0.0,

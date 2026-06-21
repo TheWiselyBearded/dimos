@@ -25,12 +25,14 @@ from dimos_lcm.std_msgs import String
 import numpy as np
 from numpy.typing import NDArray
 
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import In, Out
 from dimos.models.qwen.video_query import get_bbox_from_qwen_frame
-from dimos.msgs.geometry_msgs import Twist, Vector3
-from dimos.msgs.sensor_msgs import Image, ImageFormat
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.robot.drone.drone_visual_servoing_controller import (
     DroneVisualServoingController,
     PIDParams,
@@ -62,6 +64,7 @@ class DroneTrackingModule(Module):
         x_pid_params: PIDParams | None = None,
         y_pid_params: PIDParams | None = None,
         z_pid_params: PIDParams | None = None,
+        **kwargs: Any,
     ) -> None:
         """Initialize the drone tracking module.
 
@@ -74,7 +77,7 @@ class DroneTrackingModule(Module):
                           If None, uses preset based on outdoor flag.
             z_pid_params: Optional PID parameters for altitude control.
         """
-        super().__init__()
+        super().__init__(**kwargs)
 
         default_params = OUTDOOR_PID_PARAMS if outdoor else INDOOR_PID_PARAMS
         x_pid_params = x_pid_params if x_pid_params is not None else default_params
@@ -314,7 +317,7 @@ class DroneTrackingModule(Module):
         frame: NDArray[np.uint8],
         bbox: tuple[int, int, int, int],
         center: tuple[int, int],
-    ) -> NDArray[np.uint8]:  # type: ignore[type-arg]
+    ) -> NDArray[np.uint8]:
         """Draw tracking visualization overlay.
 
         Args:
@@ -325,7 +328,7 @@ class DroneTrackingModule(Module):
         Returns:
             Frame with overlay drawn
         """
-        overlay: NDArray[np.uint8] = frame.copy()  # type: ignore[type-arg]
+        overlay: NDArray[np.uint8] = frame.copy()
         x, y, w, h = bbox
 
         # Draw tracking box (green)
@@ -370,7 +373,7 @@ class DroneTrackingModule(Module):
         """Stop tracking and clean up."""
         self._tracking_active = False
         if self._tracking_thread and self._tracking_thread.is_alive():
-            self._tracking_thread.join(timeout=1)
+            self._tracking_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
 
         # Send stop command via LCM
         if self.cmd_vel.transport:

@@ -16,7 +16,7 @@
 from abc import ABC, abstractmethod
 from enum import Enum
 
-from dimos.msgs.geometry_msgs import PoseStamped
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
 
 class NavigationState(Enum):
@@ -68,6 +68,3 @@ class NavigationInterface(ABC):
             True if goal was cancelled, False if no goal was active
         """
         pass
-
-
-__all__ = ["NavigationInterface", "NavigationState"]

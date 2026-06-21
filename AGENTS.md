@@ -2,7 +2,7 @@
 
 ## What is DimOS
 
-The agentic operating system for generalist robotics. `Modules` communicate via typed streams over LCM, ROS2, DDS, or other transports. `Blueprints` compose modules into runnable robot stacks. `Skills` give agents the ability to execute physical on-hardware function like `grab()`, `follow_object()`, or `jump()`
+The agentic operating system for generalist robotics. `Modules` communicate via typed streams over LCM, ROS2, DDS, or other transports. `Blueprints` compose modules into runnable robot stacks. `Skills` give agents the ability to execute physical on-hardware functions like `grab()`, `follow_object()`, or `jump()`.
 
 ---
 
@@ -10,7 +10,7 @@ The agentic operating system for generalist robotics. `Modules` communicate via 
 
 ```bash
 # Install
-uv sync --all-extras --no-extra dds
+uv sync --extra all
 
 # List all runnable blueprints
 dimos list
@@ -18,8 +18,7 @@ dimos list
 # --- Go2 quadruped ---
 dimos --replay run unitree-go2                  # perception + mapping, replay data
 dimos --replay run unitree-go2 --daemon         # same, backgrounded
-dimos --replay run unitree-go2-agentic          # + LLM agent (GPT-4o) + skills
-dimos --replay run unitree-go2-agentic-mcp      # + McpServer + McpClient (MCP tools live)
+dimos --replay run unitree-go2-agentic          # + LLM agent (GPT-4o) + skills + MCP server
 dimos run unitree-go2-agentic --robot-ip 192.168.123.161  # real Go2 hardware
 
 # --- G1 humanoid ---
@@ -39,11 +38,12 @@ dimos restart          # stop + re-run with same original args
 
 | Blueprint | Robot | Hardware | Agent | MCP server | Notes |
 |-----------|-------|----------|-------|------------|-------|
-| `unitree-go2-agentic-mcp` | Go2 | real | via McpClient | ✓ | **Only blueprint with McpServer live** |
+| `unitree-go2-agentic` | Go2 | real | via McpClient | ✓ | McpServer live |
 | `unitree-g1-agentic-sim` | G1 | sim | GPT-4o (G1 prompt) | — | Full agentic sim, no real robot needed |
 | `xarm-perception-agent` | xArm | real | GPT-4o | — | Manipulation + perception + agent |
-| `xarm7-trajectory-sim` | xArm7 | sim | — | — | Trajectory planning sim |
-| `arm-teleop-xarm7` | xArm7 | real | — | — | Quest VR teleop |
+| `xarm-perception-sim-agent` | xArm | sim | GPT-4o | — | Manipulation + perception + agent, sim |
+| `xarm7-planner-coordinator` | xArm7 | real | — | — | Trajectory planner coordinator |
+| `teleop-quest-xarm7` | xArm7 | real | — | — | Quest VR teleop |
 | `dual-xarm6-planner` | xArm6×2 | real | — | — | Dual-arm motion planner |
 
 Run `dimos list` for the full list.
@@ -52,11 +52,11 @@ Run `dimos list` for the full list.
 
 ## Tools available to you (MCP)
 
-**MCP only works if the blueprint includes `McpServer`.** Currently the only shipped blueprint that does is `unitree-go2-agentic-mcp`. All other agentic blueprints use the in-process `Agent` module and do NOT expose an MCP endpoint.
+**MCP only works if the blueprint includes `McpServer`.** All shipped agentic blueprints use `McpServer` + `McpClient`. E.g.: `unitree-go2-agentic`.
 
 ```bash
 # Start the MCP-enabled blueprint first:
-dimos --replay run unitree-go2-agentic-mcp --daemon
+dimos --replay run unitree-go2-agentic --daemon
 
 # Then use MCP tools:
 dimos mcp list-tools                                              # all available skills as JSON
@@ -73,21 +73,21 @@ The MCP server runs at `http://localhost:9990/mcp` (`GlobalConfig.mcp_port`).
 
 ### Adding McpServer to a blueprint
 
-Use **both** `McpServer` and `mcp_client()` — do not mix with `agent()`.
+Use **both** `McpServer.blueprint()` and `McpClient.blueprint()`.
 
 ```python
-from dimos.agents.mcp.mcp_client import mcp_client
+from dimos.agents.mcp.mcp_client import McpClient
 from dimos.agents.mcp.mcp_server import McpServer
 
-unitree_go2_agentic_mcp = autoconnect(
+unitree_go2_agentic = autoconnect(
     unitree_go2_spatial,   # robot stack
     McpServer.blueprint(), # HTTP MCP server — exposes all @skill methods on port 9990
-    mcp_client(),          # LLM agent — fetches tools from McpServer
+    McpClient.blueprint(), # LLM agent — fetches tools from McpServer
     _common_agentic,       # skill containers
 )
 ```
 
-Reference: `dimos/robot/unitree/go2/blueprints/agentic/unitree_go2_agentic_mcp.py`
+Reference: `dimos/robot/unitree/go2/blueprints/agentic/unitree_go2_agentic.py`
 
 ---
 
@@ -96,8 +96,15 @@ Reference: `dimos/robot/unitree/go2/blueprints/agentic/unitree_go2_agentic_mcp.p
 ```
 dimos/
 ├── core/                    # Module system, blueprints, workers, transports
-│   ├── module.py            # Module base class, In/Out streams, @rpc, @skill
-│   ├── blueprints.py        # Blueprint composition (autoconnect)
+│   ├── module.py            # Module base class, In/Out streams
+│   ├── core.py              # @rpc decorator
+│   ├── stream.py            # In[T], Out[T], Transport[T]
+│   ├── transport.py         # LCM/SHM/ROS/DDS/Jpeg transports
+│   ├── coordination/
+│   │   ├── blueprints.py           # Blueprint, autoconnect()
+│   │   ├── module_coordinator.py   # Deploy + lifecycle orchestration
+│   │   ├── python_worker.py        # Forkserver workers + Actor IPC
+│   │   └── worker_manager_*.py     # Python / docker worker pools
 │   ├── global_config.py     # GlobalConfig (env vars, CLI flags, .env)
 │   └── run_registry.py      # Per-run tracking + log paths
 ├── robot/
@@ -134,6 +141,12 @@ docs/
 
 ---
 
+## For Coding Agents
+
+If you are a coding agent working on this dimos codebase, our coding agent focused docs are at `docs/coding-agents/index.md`
+
+---
+
 ## Architecture
 
 ### Modules
@@ -164,7 +177,7 @@ class MyModule(Module):
 Compose modules with `autoconnect()`. Streams auto-connect by `(name, type)` matching.
 
 ```python
-from dimos.core.blueprints import autoconnect
+from dimos.core.coordination.blueprints import autoconnect
 
 my_blueprint = autoconnect(module_a(), module_b(), module_c())
 ```
@@ -197,7 +210,7 @@ Singleton config. Values cascade: defaults → `.env` → env vars → blueprint
 
 ### Global flags
 
-Every `GlobalConfig` field is a CLI flag: `--robot-ip`, `--simulation/--no-simulation`, `--replay/--no-replay`, `--viewer {rerun|rerun-web|foxglove|none}`, `--mcp-port`, `--n-workers`, etc. Flags override `.env` and env vars.
+Every `GlobalConfig` field is a CLI flag: `--robot-ip`, `--simulation/--no-simulation`, `--replay/--no-replay`, `--viewer {rerun|rerun-web|rerun-connect|none}`, `--mcp-port`, `--n-workers`, etc. Flags override `.env` and env vars.
 
 ### Core commands
 
@@ -268,6 +281,7 @@ class MySkillContainer(Module):
         return f"Moving at {x} m/s for {duration}s"
 
 my_skill_container = MySkillContainer.blueprint
+```
 
 ### System Prompts
 
@@ -276,7 +290,7 @@ my_skill_container = MySkillContainer.blueprint
 | Go2 (default) | `dimos/agents/system_prompt.py` | `SYSTEM_PROMPT` |
 | G1 humanoid | `dimos/robot/unitree/g1/system_prompt.py` | `G1_SYSTEM_PROMPT` |
 
-Pass the robot-specific prompt: `agent(system_prompt=G1_SYSTEM_PROMPT)`. Agent defaults to Go2 — wrong prompt causes hallucinated skills.
+Pass the robot-specific prompt: `McpClient.blueprint(system_prompt=G1_SYSTEM_PROMPT)`. The default prompt is Go2-specific; using it on G1 causes hallucinated skills.
 
 ### RPC Wiring
 
@@ -302,9 +316,7 @@ class MySkillContainer(Module):
         return "Navigating"
 ```
 
-If multiple modules match the spec, use `.remappings()` to resolve. Source: `dimos/spec/utils.py`, `dimos/core/blueprints.py`.
-
-**Legacy**: existing skill containers use `rpc_calls: list[str]` + `get_rpc_calls("ClassName.method")`. This still works but wiring failures are silent and only surface at runtime. Don't use it in new code.
+If multiple modules match the spec, use `.remappings()` to resolve. Source: `dimos/spec/utils.py`, `dimos/core/coordination/blueprints.py`.
 
 ### Adding a New Skill
 
@@ -333,7 +345,7 @@ uv run pytest dimos/core/test_blueprints.py -v
 uv run mypy dimos/
 ```
 
-`uv run pytest` excludes `slow`, `tool`, and `mujoco` markers. CI (`./bin/pytest-slow`) includes slow, excludes tool and mujoco. See `docs/development/testing.md`.
+`uv run pytest` excludes `self_hosted`, `tool`, and `mujoco` markers. CI runs `self_hosted`-marked tests on the self-hosted runner only. See `docs/development/testing.md`.
 
 ---
 
@@ -367,7 +379,7 @@ CI asserts the file is current — if it's stale, CI fails.
 ## Git Workflow
 
 - Branch prefixes: `feat/`, `fix/`, `refactor/`, `docs/`, `test/`, `chore/`, `perf/`
-- **PRs target `dev`** — never push to `main` or `dev` directly
+- **PRs target `main`** — `main` is the unstable development branch. Work and PR off of `main`. Never push to `main` directly.
 - **Don't force-push** unless after a rebase with conflicts
 - **Minimize pushes** — every push triggers CI (~1 hour on self-hosted runners). Batch commits locally, push once.
 
@@ -382,4 +394,4 @@ CI asserts the file is current — if it's stale, CI fails.
 - Testing: `docs/development/testing.md`
 - CLI / dimos run: `docs/development/dimos_run.md`
 - LFS data: `docs/development/large_file_management.md`
-- Agent system: `docs/agents/`
+- Agent system: `docs/coding-agents/`

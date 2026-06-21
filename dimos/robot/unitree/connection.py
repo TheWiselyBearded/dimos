@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import functools
 import threading
 import time
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -29,29 +29,44 @@ from unitree_webrtc_connect.constants import (
     SPORT_CMD,
     VUI_COLOR,
 )
-from unitree_webrtc_connect.webrtc_driver import (  # type: ignore[import-untyped]
+from unitree_webrtc_connect.webrtc_driver import (
     UnitreeWebRTCConnection as LegionConnection,
     WebRTCConnectionMethod,
 )
 
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.resource import Resource
-from dimos.msgs.geometry_msgs import Pose, Transform, Twist
-from dimos.msgs.sensor_msgs import Image, PointCloud2
-from dimos.msgs.sensor_msgs.Image import ImageFormat
-from dimos.robot.unitree.type.lidar import RawLidarMsg, pointcloud2_from_webrtc_lidar
+from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.robot.unitree.type.lidar import (
+    RawLidarMsg,
+    pointcloud2_from_webrtc_lidar,
+)
 from dimos.robot.unitree.type.lowstate import LowStateMsg
 from dimos.robot.unitree.type.odometry import Odometry
+from dimos.types.timestamped import Timestamped
 from dimos.utils.decorators.decorators import simple_mcache
 from dimos.utils.reactive import backpressure, callback_to_observable
 
 VideoMessage: TypeAlias = NDArray[np.uint8]  # Shape: (height, width, 3)
 
 
+_T = TypeVar("_T", bound=Timestamped)
+
+
+def time_is_now(x: _T) -> _T:
+    x.ts = time.time()
+    return x
+
+
 @dataclass
 class SerializableVideoFrame:
     """Pickleable wrapper for av.VideoFrame with all metadata"""
 
-    data: np.ndarray  # type: ignore[type-arg]
+    data: np.ndarray
     pts: int | None = None
     time: float | None = None
     dts: int | None = None
@@ -76,19 +91,21 @@ class SerializableVideoFrame:
 
 
 class UnitreeWebRTCConnection(Resource):
-    def __init__(self, ip: str, mode: str = "ai") -> None:
+    _SPORT_API_ID_RAGEMODE: int = 2059
+
+    def __init__(self, ip: str, mode: str = "ai", aes_128_key: str | None = None) -> None:
         self.ip = ip
         self.mode = mode
         self.stop_timer: threading.Timer | None = None
         self.cmd_vel_timeout = 0.2
-        self.conn = LegionConnection(WebRTCConnectionMethod.LocalSTA, ip=self.ip)
+        # Per-device AES-128 key for new Unitree firmware (data2=3 handshake); omitted when unset.
+        self.conn = LegionConnection(
+            WebRTCConnectionMethod.LocalSTA, ip=self.ip, aes_128_key=aes_128_key
+        )
         self.connect()
 
     def connect(self) -> None:
         self.loop = asyncio.new_event_loop()
-        self.task = None
-        self.connected_event = asyncio.Event()
-        self.connection_ready = threading.Event()
 
         async def async_connect() -> None:
             await self.conn.connect()
@@ -100,21 +117,20 @@ class UnitreeWebRTCConnection(Resource):
                 RTC_TOPIC["MOTION_SWITCHER"], {"api_id": 1002, "parameter": {"name": self.mode}}
             )
 
-            self.connected_event.set()
-            self.connection_ready.set()
-
-            while True:
-                await asyncio.sleep(1)
-
         def start_background_loop() -> None:
             asyncio.set_event_loop(self.loop)
-            self.task = self.loop.create_task(async_connect())
             self.loop.run_forever()
 
-        self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=start_background_loop, daemon=True)
         self.thread.start()
-        self.connection_ready.wait()
+
+        # Blocks until connected; re-raises connect failures (e.g. missing AES key).
+        try:
+            asyncio.run_coroutine_threadsafe(async_connect(), self.loop).result()
+        except Exception:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            self.thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
+            raise
 
     def start(self) -> None:
         pass
@@ -124,9 +140,6 @@ class UnitreeWebRTCConnection(Resource):
         if self.stop_timer:
             self.stop_timer.cancel()
             self.stop_timer = None
-
-        if self.task:
-            self.task.cancel()
 
         async def async_disconnect() -> None:
             try:
@@ -145,7 +158,7 @@ class UnitreeWebRTCConnection(Resource):
             self.loop.call_soon_threadsafe(self.loop.stop)
 
         if self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+            self.thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
 
     def move(self, twist: Twist, duration: float = 0.0) -> bool:
         """Send movement command to the robot using Twist commands.
@@ -183,7 +196,7 @@ class UnitreeWebRTCConnection(Resource):
             self.stop_timer.cancel()
 
         # Auto-stop after 0.5 seconds if no new commands
-        self.stop_timer = threading.Timer(self.cmd_vel_timeout, self.stop)
+        self.stop_timer = threading.Timer(self.cmd_vel_timeout, self.stop_movement)
         self.stop_timer.daemon = True
         self.stop_timer.start()
 
@@ -193,7 +206,7 @@ class UnitreeWebRTCConnection(Resource):
                 future = asyncio.run_coroutine_threadsafe(async_move_duration(), self.loop)
                 future.result()
                 # Stop after duration
-                self.stop()
+                self.stop_movement()
             else:
                 # Single command for continuous movement
                 future = asyncio.run_coroutine_threadsafe(async_move(), self.loop)
@@ -243,7 +256,13 @@ class UnitreeWebRTCConnection(Resource):
 
     @simple_mcache
     def lidar_stream(self) -> Observable[PointCloud2]:
-        return backpressure(self.raw_lidar_stream().pipe(ops.map(pointcloud2_from_webrtc_lidar)))
+        return backpressure(
+            self.raw_lidar_stream().pipe(
+                ops.map(pointcloud2_from_webrtc_lidar),
+                ops.map(time_is_now),
+                # repair_stale_ts(),
+            )
+        )
 
     @simple_mcache
     def tf_stream(self) -> Observable[Transform]:
@@ -252,7 +271,14 @@ class UnitreeWebRTCConnection(Resource):
 
     @simple_mcache
     def odom_stream(self) -> Observable[Pose]:
-        return backpressure(self.raw_odom_stream().pipe(ops.map(Odometry.from_msg)))
+        return backpressure(
+            self.raw_odom_stream().pipe(
+                ops.map(
+                    Odometry.from_msg,
+                ),
+                ops.map(time_is_now),
+            )
+        )
 
     @simple_mcache
     def video_stream(self) -> Observable[Image]:
@@ -265,8 +291,9 @@ class UnitreeWebRTCConnection(Resource):
                         frame.to_ndarray(format="rgb24"),  # type: ignore[attr-defined]
                         format=ImageFormat.RGB,  # Frame is RGB24, not BGR
                         frame_id="camera_optical",
-                    )
+                    ),
                 ),
+                ops.map(time_is_now),
             )
         )
 
@@ -278,6 +305,7 @@ class UnitreeWebRTCConnection(Resource):
         return bool(self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["StandUp"]}))
 
     def balance_stand(self) -> bool:
+        """Activate BalanceStand mode — enables WIRELESS_CONTROLLER joystick commands."""
         return bool(
             self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["BalanceStand"]})
         )
@@ -287,6 +315,33 @@ class UnitreeWebRTCConnection(Resource):
             RTC_TOPIC["OBSTACLES_AVOID"],
             {"api_id": 1001, "parameter": {"enable": int(enabled)}},
         )
+
+    def free_walk(self) -> bool:
+        """Activate FreeWalk locomotion mode — enables walking and velocity commands."""
+        return bool(self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["FreeWalk"]}))
+
+    def enable_rage_mode(self) -> bool:
+        """Enable Rage Mode on the Go2 via WebRTC.
+        Assumes the robot is already in BalanceStand.
+        """
+        rage_ok = bool(
+            self.publish_request(
+                RTC_TOPIC["SPORT_MOD"],
+                {"api_id": self._SPORT_API_ID_RAGEMODE, "parameter": {"data": True}},
+            )
+        )
+        time.sleep(2.0)
+
+        joystick_ok = bool(
+            self.publish_request(
+                RTC_TOPIC["SPORT_MOD"],
+                {
+                    "api_id": SPORT_CMD["SwitchJoystick"],
+                    "parameter": {"data": True},
+                },
+            )
+        )
+        return rage_ok and joystick_ok
 
     def liedown(self) -> bool:
         return bool(
@@ -316,7 +371,7 @@ class UnitreeWebRTCConnection(Resource):
         subject: Subject[VideoMessage] = Subject()
         stop_event = threading.Event()
 
-        from aiortc import MediaStreamTrack  # type: ignore[import-untyped]
+        from aiortc import MediaStreamTrack
 
         async def accept_track(track: MediaStreamTrack) -> None:
             while True:
@@ -358,19 +413,13 @@ class UnitreeWebRTCConnection(Resource):
         Returns:
             Observable: An observable stream of video frames or None if video is not available.
         """
-        return self.video_stream()  # type: ignore[no-any-return]
+        return self.video_stream()
 
-    def stop(self) -> bool:  # type: ignore[no-redef]
-        """Stop the robot's movement.
-
-        Returns:
-            bool: True if stop command was sent successfully
-        """
-        # Cancel timer since we're explicitly stopping
+    def stop_movement(self) -> None:
+        """Cancel the auto-stop timer (used by move() for continuous commands)."""
         if self.stop_timer:
             self.stop_timer.cancel()
             self.stop_timer = None
-        return True
 
     def disconnect(self) -> None:
         """Disconnect from the robot and clean up resources."""
@@ -379,8 +428,6 @@ class UnitreeWebRTCConnection(Resource):
             self.stop_timer.cancel()
             self.stop_timer = None
 
-        if hasattr(self, "task") and self.task:
-            self.task.cancel()
         if hasattr(self, "conn"):
 
             async def async_disconnect() -> None:
@@ -396,4 +443,4 @@ class UnitreeWebRTCConnection(Resource):
             self.loop.call_soon_threadsafe(self.loop.stop)
 
         if hasattr(self, "thread") and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+            self.thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)

@@ -31,15 +31,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from dimos.control.components import JointName
-from dimos.hardware.manipulators.spec import ControlMode
+from dimos.hardware.manipulators.spec import ControlMode as ControlMode
+from dimos.hardware.whole_body.spec import IMUState
 
 if TYPE_CHECKING:
-    from dimos.msgs.geometry_msgs import Pose, PoseStamped
+    from dimos.msgs.geometry_msgs.Pose import Pose
+    from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
     from dimos.teleop.quest.quest_types import Buttons
-
-# =============================================================================
-# Data Types
-# =============================================================================
 
 
 @dataclass(frozen=True)
@@ -51,7 +49,7 @@ class ResourceClaim:
 
     Attributes:
         joints: Set of joint names this task wants to control.
-                Example: frozenset({"left_joint1", "left_joint2"})
+                Example: frozenset({"left/joint1", "left/joint2"})
         priority: Priority level for conflict resolution. Higher wins.
                   Typical values: 10 (trajectory), 50 (WBC), 100 (safety)
         mode: Control mode (POSITION, VELOCITY, TORQUE)
@@ -109,13 +107,16 @@ class CoordinatorState:
 
     Attributes:
         joints: Aggregated joint states from all hardware
+        imu: Per-whole-body IMU readings, keyed by hardware_id.
+            Empty dict when no whole-body hardware exposes IMU this tick.
         t_now: Current tick time (time.perf_counter())
         dt: Time since last tick (seconds)
     """
 
     joints: JointStateSnapshot
-    t_now: float  # Coordinator time (perf_counter) - USE THIS, NOT time.time()!
-    dt: float  # Time since last tick
+    imu: dict[str, IMUState] = field(default_factory=dict)
+    t_now: float = 0.0  # Coordinator time (perf_counter) - USE THIS, NOT time.time()!
+    dt: float = 0.0  # Time since last tick
 
 
 @dataclass
@@ -168,11 +169,6 @@ class JointCommandOutput:
                 return None
 
 
-# =============================================================================
-# ControlTask Protocol
-# =============================================================================
-
-
 @runtime_checkable
 class ControlTask(Protocol):
     """Protocol for passive tasks that run within the coordinator.
@@ -197,7 +193,7 @@ class ControlTask(Protocol):
         ...
         ...     def claim(self) -> ResourceClaim:
         ...         return ResourceClaim(
-        ...             joints=frozenset(["left_joint1", "left_joint2"]),
+        ...             joints=frozenset(["left/joint1", "left/joint2"]),
         ...             priority=10,
         ...         )
         ...
@@ -209,7 +205,7 @@ class ControlTask(Protocol):
         ...         t_elapsed = state.t_now - self._start_time
         ...         positions = self._trajectory.sample(t_elapsed)
         ...         return JointCommandOutput(
-        ...             joint_names=["left_joint1", "left_joint2"],
+        ...             joint_names=["left/joint1", "left/joint2"],
         ...             positions=positions,
         ...         )
         ...
@@ -330,17 +326,3 @@ class BaseControlTask(ControlTask):
     def set_velocities_by_name(self, velocities: dict[str, float], t_now: float) -> bool:
         """No-op default."""
         return False
-
-
-__all__ = [
-    # Protocol + Base
-    "BaseControlTask",
-    # Types
-    "ControlMode",
-    "ControlTask",
-    "CoordinatorState",
-    "JointCommandOutput",
-    "JointName",
-    "JointStateSnapshot",
-    "ResourceClaim",
-]

@@ -20,11 +20,12 @@ Composes on top of drone_basic (connection + camera + vis) and adds
 tracking, mapping skills, and an LLM agent.
 """
 
-from dimos.agents.agent import agent
+from dimos.agents.mcp.mcp_client import McpClient
+from dimos.agents.mcp.mcp_server import McpServer
 from dimos.agents.skills.google_maps_skill_container import GoogleMapsSkillContainer
 from dimos.agents.skills.osm import OsmSkill
-from dimos.agents.web_human_input import web_input
-from dimos.core.blueprints import autoconnect
+from dimos.agents.web_human_input import WebInput
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.robot.drone.blueprints.basic.drone_basic import drone_basic
 from dimos.robot.drone.drone_tracking_module import DroneTrackingModule
 
@@ -44,16 +45,12 @@ drone_agentic = autoconnect(
     DroneTrackingModule.blueprint(outdoor=False),
     GoogleMapsSkillContainer.blueprint(),
     OsmSkill.blueprint(),
-    agent(system_prompt=DRONE_SYSTEM_PROMPT, model="gpt-4o"),
-    web_input(),
+    McpServer.blueprint(),
+    McpClient.blueprint(system_prompt=DRONE_SYSTEM_PROMPT, model="gpt-4o"),
+    WebInput.blueprint(),
 ).remappings(
     [
         (DroneTrackingModule, "video_input", "video"),
         (DroneTrackingModule, "cmd_vel", "movecmd_twist"),
     ]
 )
-
-__all__ = [
-    "DRONE_SYSTEM_PROMPT",
-    "drone_agentic",
-]
