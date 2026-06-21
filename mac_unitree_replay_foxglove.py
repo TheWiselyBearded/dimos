@@ -158,11 +158,13 @@ def to_tfmessage(transforms, ts):
 def main():
     _patch_pointcloud2_rgb_alpha()
     print(f"loading dataset '{DATASET}'...")
-    from dimos.utils.testing import TimedSensorReplay
+    from dimos.utils.testing.replay import TimedSensorReplay
     from dimos.robot.unitree.type.odometry import Odometry
-    from dimos.protocol.tf import TF
-    from dimos.msgs.geometry_msgs import Transform, Vector3, Quaternion
-    from dimos.msgs.sensor_msgs import CameraInfo
+    from dimos.protocol.tf.tf import TF
+    from dimos.msgs.geometry_msgs.Transform import Transform
+    from dimos.msgs.geometry_msgs.Vector3 import Vector3
+    from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 
     # Inlined from dimos.robot.unitree.go2.connection — that module pulls in
     # unitree_webrtc_connect which isn't needed for replay.
@@ -191,7 +193,8 @@ def main():
     from dimos.perception.detection.module3D import Detection3DModule
     from dimos.perception.detection.detectors.yolo import Yolo2DDetector
     from dimos.core.transport import LCMTransport
-    from dimos.msgs.sensor_msgs import Image, PointCloud2
+    from dimos.msgs.sensor_msgs.Image import Image
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
     from dimos_lcm.foxglove_msgs.ImageAnnotations import ImageAnnotations
     from dimos_lcm.foxglove_msgs.SceneUpdate import SceneUpdate
     from dimos_lcm.tf2_msgs.TFMessage import TFMessage

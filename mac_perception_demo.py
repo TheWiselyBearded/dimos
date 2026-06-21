@@ -42,7 +42,7 @@ def load_image(path: Path):
 
 
 def run(detector_label: str, device: str | None, image_np):
-    from dimos.msgs.sensor_msgs import Image
+    from dimos.msgs.sensor_msgs.Image import Image
     from dimos.perception.detection.detectors.yolo import Yolo2DDetector
 
     print(f"\n=== {detector_label} (device={device or 'auto'}) ===")

@@ -178,7 +178,9 @@ def make_camera_to_world_transform(c2w_opencv: np.ndarray, ts: float):
     `Object.from_2d_to_list` uses this to push per-object pointclouds into world
     frame (it calls pc.transform(camera_transform); see object.py:251).
     """
-    from dimos.msgs.geometry_msgs import Transform, Vector3, Quaternion
+    from dimos.msgs.geometry_msgs.Transform import Transform
+    from dimos.msgs.geometry_msgs.Vector3 import Vector3
+    from dimos.msgs.geometry_msgs.Quaternion import Quaternion
     t, q = c2w_to_translation_quat(c2w_opencv)
     return Transform(
         translation=Vector3(float(t[0]), float(t[1]), float(t[2])),
@@ -195,7 +197,7 @@ def make_camera_to_world_transform(c2w_opencv: np.ndarray, ts: float):
 
 def make_camera_info(width: int, height: int, hfov_deg: float):
     """Pinhole intrinsics for an undistorted Viture frame at the given size."""
-    from dimos.msgs.sensor_msgs import CameraInfo
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
     fx = (width / 2.0) / np.tan(np.deg2rad(hfov_deg / 2.0))
     fy = fx
     cx, cy = width / 2.0, height / 2.0
@@ -578,7 +580,7 @@ class LocalYoloeDetector:
         self._lock = threading.Lock()
 
     def process_image(self, image):
-        from dimos.perception.detection.type import ImageDetections2D
+        from dimos.perception.detection.type.detection2d.imageDetections2D import ImageDetections2D
         with self._lock:
             results = self.model.track(
                 source=image.to_opencv(), device=self.device,
@@ -631,7 +633,7 @@ def build_scene_update_for_objects(objects: list[Any], ts: float):
     from lcm_msgs.builtin_interfaces import Duration
     from lcm_msgs.foxglove_msgs import CubePrimitive, SceneEntity, TextPrimitive
     from lcm_msgs.geometry_msgs import Point, Pose, Quaternion as LCMQ, Vector3 as LCMV3
-    from dimos.msgs.foxglove_msgs.Color import Color
+    from dimos_lcm.foxglove_msgs import Color
     from dimos.types.timestamped import to_ros_stamp
 
     update = SceneUpdate()
@@ -731,9 +733,9 @@ class SpatialMemoryAdapter:
         try:
             import chromadb
             from chromadb.config import Settings
-            from dimos.agents_deprecated.memory.image_embedding import ImageEmbeddingProvider
-            from dimos.agents_deprecated.memory.spatial_vector_db import SpatialVectorDB
-            from dimos.agents_deprecated.memory.visual_memory import VisualMemory
+            from dimos.perception.image_embedding import ImageEmbeddingProvider
+            from dimos.perception.spatial_vector_db import SpatialVectorDB
+            from dimos.perception.visual_memory import VisualMemory
         except Exception as e:
             sys.exit(f"--enable-clip-memory requested but imports failed: {e}")
         db_path.mkdir(parents=True, exist_ok=True)
@@ -848,7 +850,10 @@ def main() -> None:
 
     # ---- LCM transports & dimos message types ----
     from dimos.core.transport import LCMTransport
-    from dimos.msgs.sensor_msgs import Image, ImageFormat, PointCloud2, CameraInfo
+    from dimos.msgs.sensor_msgs.Image import Image
+    from dimos.msgs.sensor_msgs.Image import ImageFormat
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
     from dimos.perception.detection.module2D import Detection2DModule
     from dimos.perception.detection.objectDB import ObjectDB
     from dimos.perception.detection.type.detection3d.object import Object, aggregate_pointclouds

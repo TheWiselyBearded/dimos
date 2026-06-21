@@ -116,7 +116,9 @@ def arkit_c2w_to_opencv(c2w: np.ndarray) -> np.ndarray:
 
 def transform_to_lcm(T: np.ndarray, frame_id: str, child_frame_id: str):
     """4x4 numpy -> dimos.msgs.geometry_msgs.Transform."""
-    from dimos.msgs.geometry_msgs import Transform, Vector3, Quaternion
+    from dimos.msgs.geometry_msgs.Transform import Transform
+    from dimos.msgs.geometry_msgs.Vector3 import Vector3
+    from dimos.msgs.geometry_msgs.Quaternion import Quaternion
     t, q = c2w_to_translation_quat(T)
     return Transform(
         translation=Vector3(float(t[0]), float(t[1]), float(t[2])),
@@ -129,7 +131,7 @@ def transform_to_lcm(T: np.ndarray, frame_id: str, child_frame_id: str):
 def load_ply_as_pointcloud2(ply_path: Path, frame_id: str, max_points: int):
     """Load PLY, optionally downsample, and return a colored PointCloud2 in `frame_id`."""
     import open3d as o3d
-    from dimos.msgs.sensor_msgs import PointCloud2
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
     print(f"loading {ply_path.name} ...")
     pcd = o3d.io.read_point_cloud(str(ply_path))
@@ -159,7 +161,10 @@ def main():
 
     from xr_nav.recording_loader import RecordingLoader
     from dimos.core.transport import LCMTransport
-    from dimos.msgs.sensor_msgs import Image, ImageFormat, PointCloud2, CameraInfo
+    from dimos.msgs.sensor_msgs.Image import Image
+    from dimos.msgs.sensor_msgs.Image import ImageFormat
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
     from dimos.perception.detection.detectors.yolo import Yolo2DDetector
     from dimos.perception.detection.module2D import Detection2DModule
     from dimos.perception.detection.module3D import Detection3DModule

@@ -24,7 +24,7 @@ def main():
 
     from dimos_lcm.foxglove_msgs.ImageAnnotations import ImageAnnotations
     from dimos.core.transport import LCMTransport
-    from dimos.msgs.sensor_msgs import Image
+    from dimos.msgs.sensor_msgs.Image import Image
     from dimos.perception.detection.detectors.yolo import Yolo2DDetector
 
     print("loading detector...")

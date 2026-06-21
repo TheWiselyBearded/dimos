@@ -194,7 +194,7 @@ class MapAccumulator:
         return len(self.pcd.points)
 
     def to_pointcloud2(self, frame_id: str, ts: float):
-        from dimos.msgs.sensor_msgs import PointCloud2
+        from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
         return PointCloud2(pointcloud=self.pcd, frame_id=frame_id, ts=ts)
 
 
@@ -203,7 +203,7 @@ def build_da3_camera_info(K_da3: np.ndarray | None, w: int, h: int, hfov_deg: fl
 
     Prefer DA3-estimated intrinsics when they look sane (focal in 0.3*w..5*w).
     """
-    from dimos.msgs.sensor_msgs import CameraInfo
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 
     if K_da3 is not None:
         fx, fy = float(K_da3[0, 0]), float(K_da3[1, 1])
@@ -273,8 +273,13 @@ def main():
 
     import open3d as o3d
     from dimos.core.transport import LCMTransport
-    from dimos.msgs.sensor_msgs import Image, ImageFormat, PointCloud2, CameraInfo
-    from dimos.msgs.geometry_msgs import Transform, Vector3, Quaternion
+    from dimos.msgs.sensor_msgs.Image import Image
+    from dimos.msgs.sensor_msgs.Image import ImageFormat
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
+    from dimos.msgs.geometry_msgs.Transform import Transform
+    from dimos.msgs.geometry_msgs.Vector3 import Vector3
+    from dimos.msgs.geometry_msgs.Quaternion import Quaternion
     from dimos.perception.detection.detectors.yolo import Yolo2DDetector
     from dimos.perception.detection.module2D import Detection2DModule
     from dimos.perception.detection.module3D import Detection3DModule
