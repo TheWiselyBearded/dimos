@@ -337,7 +337,7 @@ def main():
 
     # ---- Detection (2D + 3D, like mac_unitree_replay_foxglove.py) ----
     print("warming detectors (yolo cpu)...")
-    det2d = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"))
+    det2d = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"), camera_info=display_cam_info)
     det3d = Detection3DModule(camera_info=display_cam_info)
     # 3D module projects the cloud through display intrinsics; identity transform
     # because our DA3 cloud is already expressed in camera_optical.
@@ -490,7 +490,8 @@ def main():
             img_topic.publish(color_msg)
             cam_info_topic.publish(display_cam_info)
             depth_cam_info_topic.publish(da3_cam_info)
-            ann_topic.publish(dets2d.to_foxglove_annotations())
+            if hasattr(dets2d, "to_foxglove_annotations"):  # Foxglove annotations removed upstream (PR #2122)
+                ann_topic.publish(dets2d.to_foxglove_annotations())
             depth_topic.publish(depth_msg)
             points_topic.publish(points_msg)
             tf_topic.publish(make_tf_from_c2w(c2w, ts))

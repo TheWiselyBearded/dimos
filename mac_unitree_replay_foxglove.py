@@ -210,7 +210,7 @@ def main():
 
     # detectors
     print("warming detectors...")
-    det2d = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"))
+    det2d = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"), camera_info=camera_info)
     det3d = Detection3DModule(camera_info=camera_info)
 
     # LCM topics
@@ -294,7 +294,8 @@ def main():
                 img_topic.publish(video_frame)
                 cam_info_topic.publish(camera_info)
                 lidar_topic.publish(lidar_frame)
-                ann_topic.publish(dets2d.to_foxglove_annotations())
+                if hasattr(dets2d, "to_foxglove_annotations"):  # Foxglove annotations removed upstream (PR #2122)
+                    ann_topic.publish(dets2d.to_foxglove_annotations())
                 if dets3d is not None and len(dets3d.detections):
                     scene_topic.publish(dets3d.to_foxglove_scene_update())
                     n_3d += 1

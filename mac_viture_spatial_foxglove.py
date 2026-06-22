@@ -918,7 +918,7 @@ def main() -> None:
 
     # ---- Detection ----
     print("[main] warming YOLOE detector (may download weights on first run)...")
-    det2d = Detection2DModule(detector=lambda: LocalYoloeDetector(device=args.device))
+    det2d = Detection2DModule(detector=lambda: LocalYoloeDetector(device=args.device), camera_info=cam_info)
     object_db = ObjectDB(
         distance_threshold=OBJECTS_DIST_THRESHOLD_M,
         min_detections_for_permanent=OBJECTS_MIN_DETECTIONS,
@@ -1136,7 +1136,9 @@ def main() -> None:
             img_topic.publish(color_msg)
             cam_info_topic.publish(cam_info)
             depth_cam_info_topic.publish(cam_info)
-            ann_topic.publish(dets2d.to_foxglove_annotations())
+            # Upstream removed Foxglove ImageAnnotations support (PR #2122); log 2D
+            # detection boxes natively to Rerun instead (overlay on the image).
+            rerun.log_detections_2d("world/color_image/detections", dets2d)
             depth_topic.publish(depth_msg)
             points_topic.publish(points_msg)
             tf_topic.publish(make_tf_msg(c2w, ts))

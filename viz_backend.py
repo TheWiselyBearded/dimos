@@ -105,6 +105,38 @@ class RerunViz:
         except Exception as e:  # noqa: BLE001
             logger.debug("rr.log failed for %s: %s", entity_path, e)
 
+    def log_detections_2d(self, entity_path: str, detections: Any) -> None:
+        """Overlay 2D detection boxes on an image entity.
+
+        Rerun analogue of the (upstream-removed) Foxglove ImageAnnotations. Reads
+        ``.bbox = (x1, y1, x2, y2)`` and ``.name`` off each detection. Log to a child
+        of the image entity (e.g. ``world/color_image/detections``) so the boxes
+        overlay the image in the 2D view.
+        """
+        if not self.enabled:
+            return
+        dets = getattr(detections, "detections", None)
+        if not dets:
+            return
+        mins, sizes, labels = [], [], []
+        for d in dets:
+            box = getattr(d, "bbox", None)
+            if box is None:
+                continue
+            try:
+                x1, y1, x2, y2 = (float(v) for v in box)
+            except Exception:  # noqa: BLE001
+                continue
+            mins.append([x1, y1])
+            sizes.append([x2 - x1, y2 - y1])
+            labels.append(getattr(d, "name", "") or "")
+        if not mins:
+            return
+        try:
+            self._rr.log(entity_path, self._rr.Boxes2D(mins=mins, sizes=sizes, labels=labels))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("rr boxes2d log failed: %s", e)
+
     def log_object_boxes(self, entity_path: str, objects: list[Any]) -> None:
         """Rerun analogue of the Foxglove SceneUpdate cubes for tracked objects.
 

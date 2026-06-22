@@ -272,7 +272,7 @@ def main():
 
     # ---- Detection ----
     print("warming detectors (yolo cpu)...")
-    det2d = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"))
+    det2d = Detection2DModule(detector=lambda: Yolo2DDetector(device="cpu"), camera_info=cam_info)
     det3d = Detection3DModule(camera_info=cam_info)
     identity_optical_tf = Transform(
         translation=Vector3(0.0, 0.0, 0.0),
@@ -393,7 +393,8 @@ def main():
             # ---- Publish ----
             img_topic.publish(color_msg)
             cam_info_topic.publish(cam_info)
-            ann_topic.publish(dets2d.to_foxglove_annotations())
+            if hasattr(dets2d, "to_foxglove_annotations"):  # Foxglove annotations removed upstream (PR #2122)
+                ann_topic.publish(dets2d.to_foxglove_annotations())
             depth_topic.publish(depth_msg)
             points_topic.publish(points_msg)
             tf_topic.publish(make_tf_from_c2w(c2w, ts))

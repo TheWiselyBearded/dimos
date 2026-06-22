@@ -51,7 +51,8 @@ def main():
             dets = detector.process_image(img)
 
             img_topic.publish(img)
-            ann_topic.publish(dets.to_foxglove_annotations())
+            if hasattr(dets, "to_foxglove_annotations"):  # Foxglove annotations removed upstream (PR #2122)
+                ann_topic.publish(dets.to_foxglove_annotations())
 
             n += 1
             if n % FPS == 0:
