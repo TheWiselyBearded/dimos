@@ -92,8 +92,16 @@ class RerunViz:
                 rrb.Horizontal(
                     rrb.Spatial3DView(
                         origin="/world", name="3D reconstruction",
-                        # keep the 2D images out of the 3D view
-                        contents=["+ /world/**", "- /world/color_image", "- /world/depth"],
+                        # keep the 2D images out of the 3D view, and default to the
+                        # clean accumulated voxel map (/map) rather than the raw,
+                        # noisy per-frame cloud (/points_frame) — re-add it in-viewer
+                        # if you want live frame points.
+                        contents=[
+                            "+ /world/**",
+                            "- /world/color_image",
+                            "- /world/depth",
+                            "- /world/points_frame",
+                        ],
                     ),
                     rrb.Vertical(
                         rrb.Spatial2DView(origin="/world/color_image", name="color + detections"),
@@ -110,6 +118,24 @@ class RerunViz:
         """Set the active timeline position so a frame's logs share a timestamp."""
         if self.enabled:
             self._rr.set_time("ts", timestamp=ts)
+
+    def log_camera_pose(self, entity_path: str, c2w: Any) -> None:
+        """Move the camera frustum: log the camera-to-world pose as a Transform3D on
+        the pinhole entity so the frustum follows the device orientation/position.
+
+        ``CameraInfo.to_rerun()`` only emits a Pinhole (no pose), so without this the
+        frustum stays fixed at the world origin while the device clearly moves.
+        """
+        if not self.enabled:
+            return
+        try:
+            m = np.asarray(c2w, dtype=float)
+            self._rr.log(
+                entity_path,
+                self._rr.Transform3D(translation=m[:3, 3], mat3x3=m[:3, :3]),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("camera pose log failed for %s: %s", entity_path, e)
 
     def log(self, entity_path: str, msg: Any, **to_rerun_kwargs: Any) -> None:
         """Log a dimos message via its ``to_rerun()`` method.

@@ -166,6 +166,39 @@ def make_camera_to_world_transform(c2w_opencv: np.ndarray, ts: float):
     )
 
 
+def _log_reference_keyframes(rr, reference_map, max_kfs: int = 30) -> None:
+    """Draw reference keyframe camera frustums (static) at world/map/keyframes/*.
+
+    Shows where the reference frames were captured — the anchors the live visual
+    layer matches features against. Subsampled so a long capture stays legible.
+    """
+    kfs = reference_map.keyframes
+    if not kfs:
+        return
+    step = max(1, len(kfs) // max_kfs)
+    for kf in kfs[::step]:
+        H, W = kf.image_hw
+        c2w = np.asarray(kf.pose_4x4, dtype=np.float64)
+        path = f"world/map/keyframes/kf_{kf.idx:06d}"
+        archs = [rr.Transform3D(translation=c2w[:3, 3], mat3x3=c2w[:3, :3])]
+        if W > 0 and H > 0:
+            archs.append(rr.Pinhole(
+                image_from_camera=np.asarray(kf.intrinsics, dtype=np.float64),
+                resolution=[float(W), float(H)]))
+        for arch in archs:
+            try:
+                rr.log(path, arch, static=True)
+            except TypeError:
+                try:
+                    rr.log(path, arch, timeless=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[reloc] keyframe frustum log failed: {e}")
+                    return
+            except Exception as e:  # noqa: BLE001
+                print(f"[reloc] keyframe frustum log failed: {e}")
+                return
+
+
 def make_camera_info(width: int, height: int, hfov_deg: float):
     from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
     fx = (width / 2.0) / np.tan(np.deg2rad(hfov_deg / 2.0))
@@ -977,7 +1010,7 @@ def main() -> None:
     from xr_nav.keyframe_recorder import KeyframeRecorder
     from xr_nav.cli_args import resolve_cloud_min_observations
     from xr_nav.reference_map import ReferenceMap
-    from xr_nav.relocalize_live import run_relocalization
+    from xr_nav.relocalize_live import run_relocalization, LiveKeyframe
 
     source = VideoSource(video_path=args.video, fps_cap=args.max_fps,
                          loop=not args.no_loop)
@@ -1067,7 +1100,8 @@ def main() -> None:
         cloud_min_observations=resolve_cloud_min_observations(args),
     )
     keyframe_recorder = (
-        KeyframeRecorder(args.save_keyframes, rgb_format=args.keyframe_rgb_format)
+        KeyframeRecorder(args.save_keyframes, rgb_format=args.keyframe_rgb_format,
+                         save_depth=args.keyframe_save_depth)
         if args.save_keyframes is not None else None
     )
 
@@ -1100,12 +1134,21 @@ def main() -> None:
             except Exception as e:  # noqa: BLE001
                 print(f"[reloc] reference cloud log failed: {e}")
 
+        # Visual layer (Phase B): build the ORB feature DB from reference
+        # keyframes and draw their camera frustums so the operator sees where the
+        # reference frames were captured (the anchors live features match against).
+        if reference_map.keyframes:
+            reference_map.build_feature_db()
+            if rerun.enabled:
+                _log_reference_keyframes(rerun._rr, reference_map)
+
     pose_offset = np.eye(4, dtype=np.float64)   # T_align (session -> map)
     reloc_enabled = bool(args.relocalize) and reference_map is not None
     if args.relocalize and reference_map is None:
         print("[reloc] WARNING: --relocalize passed without --reference-map; disabled")
     reloc_capturing = False
     reloc_buffer: list[np.ndarray] = []         # session-frame world points during a sweep
+    reloc_live_kfs: list = []                    # LiveKeyframe samples for the visual seed
     reloc_frames_left = 0
 
     def _emit_reloc_status(status: dict) -> None:
@@ -1189,6 +1232,7 @@ def main() -> None:
                 if not reloc_capturing:
                     reloc_capturing = True
                     reloc_buffer = []
+                    reloc_live_kfs = []
                     reloc_frames_left = max(1, args.reloc_capture_frames)
                     print(f"[reloc] capture started — sweep the head now "
                           f"({reloc_frames_left} frames) ...")
@@ -1252,6 +1296,7 @@ def main() -> None:
                     and n % max(1, args.save_keyframes_every_n) == 0):
                 keyframe_recorder.record(
                     idx=n, rgb=small_rgb, pose_4x4=c2w, intrinsics=K, timestamp=ts,
+                    depth=depth_m,
                 )
 
             depth_msg = Image.from_numpy(depth_m, format=ImageFormat.DEPTH,
@@ -1307,17 +1352,25 @@ def main() -> None:
             if reloc_capturing:
                 if len(cam_pts_s) > 0:
                     reloc_buffer.append(world_pts)
+                # Stash a handful of live keyframes (rgb+depth+pose) for the visual
+                # seed. c2w is session-frame here (pose_offset still identity).
+                if len(reloc_live_kfs) < 6 and reloc_frames_left % 6 == 0:
+                    reloc_live_kfs.append(LiveKeyframe(
+                        rgb=small_rgb.copy(), depth=depth_m.copy(),
+                        c2w=c2w.copy(), K=K))
                 reloc_frames_left -= 1
                 if reloc_frames_left <= 0:
                     reloc_capturing = False
                     local_xyz = (np.concatenate(reloc_buffer, axis=0)
                                  if reloc_buffer else np.zeros((0, 3), np.float32))
                     print(f"[reloc] solving — {len(local_xyz)} local pts vs "
-                          f"{len(reference_map)} reference voxels ...")
+                          f"{len(reference_map)} reference voxels, "
+                          f"{len(reloc_live_kfs)} live keyframes ...")
                     _emit_reloc_status({"state": "solving", "n_local": int(len(local_xyz))})
                     result = run_relocalization(
                         reference_map, local_xyz,
                         fitness_threshold=args.reloc_fitness_threshold,
+                        live_keyframes=reloc_live_kfs,
                     )
                     print(f"[reloc] {result.message}")
                     if result.success:
@@ -1349,6 +1402,7 @@ def main() -> None:
                             "translation": [round(float(x), 3) for x in tvec],
                             "method": result.method,
                             "n_local": result.n_local_points,
+                            "n_visual": result.n_visual_inliers,
                         })
                     else:
                         _emit_reloc_status({
@@ -1398,14 +1452,17 @@ def main() -> None:
                 spatial_mem.maybe_store(small_bgr, c2w, ts)
 
             rerun.set_time(ts)
+            # Move the camera frustum with the device pose (CameraInfo.to_rerun has
+            # no pose, so the pinhole would otherwise stay fixed at the origin).
+            rerun.log_camera_pose("world/camera_info", c2w)
             img_topic.publish(color_msg)
             cam_info_topic.publish(cam_info)
             depth_cam_info_topic.publish(cam_info)
             if dets2d is not None:
-                # Upstream removed Foxglove ImageAnnotations support (PR #2122), so
-                # 2D boxes are logged natively to Rerun. Same entity as the image so
-                # they overlay it in one 2D view (not an orphan black panel).
-                rerun.log_detections_2d("world/color_image", dets2d)
+                # Detection boxes as toggleable child entities so they can be shown/
+                # hidden independently on both the color and depth panels.
+                rerun.log_detections_2d("world/color_image/detections", dets2d)
+                rerun.log_detections_2d("world/depth/detections", dets2d)
             depth_topic.publish(depth_msg)
             points_topic.publish(points_msg)
             tf_topic.publish(make_tf_msg(c2w, ts))

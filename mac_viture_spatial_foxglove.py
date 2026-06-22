@@ -1136,13 +1136,16 @@ def main() -> None:
 
             # ---- Publish ----
             rerun.set_time(ts)
+            # Move the camera frustum with the device pose (CameraInfo.to_rerun has
+            # no pose, so the pinhole would otherwise stay fixed at the origin).
+            rerun.log_camera_pose("world/camera_info", c2w)
             img_topic.publish(color_msg)
             cam_info_topic.publish(cam_info)
             depth_cam_info_topic.publish(cam_info)
-            # Upstream removed Foxglove ImageAnnotations support (PR #2122); log 2D
-            # detection boxes natively to Rerun, same entity as the image so they
-            # overlay it in one 2D view.
-            rerun.log_detections_2d("world/color_image", dets2d)
+            # Detection boxes as toggleable child entities so they can be shown/hidden
+            # independently on both the color and depth panels.
+            rerun.log_detections_2d("world/color_image/detections", dets2d)
+            rerun.log_detections_2d("world/depth/detections", dets2d)
             depth_topic.publish(depth_msg)
             points_topic.publish(points_msg)
             tf_topic.publish(make_tf_msg(c2w, ts))
