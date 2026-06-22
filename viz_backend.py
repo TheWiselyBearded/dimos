@@ -27,6 +27,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 FOXGLOVE = "foxglove"
@@ -105,18 +107,48 @@ class RerunViz:
         except Exception as e:  # noqa: BLE001
             logger.debug("rr.log failed for %s: %s", entity_path, e)
 
+    def log_pointcloud(self, entity_path: str, pc2: Any, radius: float = 0.01) -> None:
+        """Log a dimos PointCloud2 as ``rr.Points3D`` preserving its real RGB.
+
+        Unlike ``PointCloud2.to_rerun()`` (which height-colormaps via class_ids and
+        draws fat voxel-sized spheres), this uses the cloud's own per-point colors
+        (``as_numpy()`` -> [0,1] RGB) and small points, so the cloud looks like the
+        real scene. Falls back to uncolored points if the cloud carries no colors.
+        """
+        if not self.enabled:
+            return
+        try:
+            points, colors = pc2.as_numpy()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("pointcloud as_numpy failed for %s: %s", entity_path, e)
+            return
+        if points is None or len(points) == 0:
+            return
+        kwargs: dict[str, Any] = {"radii": radius}
+        if colors is not None and len(colors) == len(points):
+            kwargs["colors"] = (np.clip(np.asarray(colors), 0.0, 1.0) * 255).astype(np.uint8)
+        try:
+            self._rr.log(entity_path, self._rr.Points3D(points, **kwargs))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("rr points3d log failed for %s: %s", entity_path, e)
+
     def log_detections_2d(self, entity_path: str, detections: Any) -> None:
         """Overlay 2D detection boxes on an image entity.
 
         Rerun analogue of the (upstream-removed) Foxglove ImageAnnotations. Reads
-        ``.bbox = (x1, y1, x2, y2)`` and ``.name`` off each detection. Log to a child
-        of the image entity (e.g. ``world/color_image/detections``) so the boxes
-        overlay the image in the 2D view.
+        ``.bbox = (x1, y1, x2, y2)`` and ``.name`` off each detection. Log to the
+        SAME entity as the image (e.g. ``world/color_image``) so the boxes overlay
+        it in one 2D view. Logs an empty Boxes2D when there are no detections so
+        stale boxes from a prior frame are cleared.
         """
         if not self.enabled:
             return
-        dets = getattr(detections, "detections", None)
+        dets = getattr(detections, "detections", None) or []
         if not dets:
+            try:
+                self._rr.log(entity_path, self._rr.Boxes2D(mins=[], sizes=[]))
+            except Exception as e:  # noqa: BLE001
+                logger.debug("rr boxes2d clear failed: %s", e)
             return
         mins, sizes, labels = [], [], []
         for d in dets:
@@ -179,15 +211,22 @@ class DualPublisher:
         rerun: RerunViz | None = None,
         entity_path: str | None = None,
         to_rerun_kwargs: dict | None = None,
+        rerun_as: str | None = None,
+        rerun_radius: float = 0.01,
     ) -> None:
         self.topic = topic
         self.lcm = lcm_factory(topic, msg_type) if lcm_factory is not None else None
         self._rr = rerun
         self._entity = entity_path or ("world" + topic)
         self._kw = to_rerun_kwargs or {}
+        self._rerun_as = rerun_as          # "pointcloud" -> log real RGB via log_pointcloud
+        self._rerun_radius = rerun_radius
 
     def publish(self, msg: Any) -> None:
         if self.lcm is not None:
             self.lcm.publish(msg)
         if self._rr is not None:
-            self._rr.log(self._entity, msg, **self._kw)
+            if self._rerun_as == "pointcloud":
+                self._rr.log_pointcloud(self._entity, msg, radius=self._rerun_radius)
+            else:
+                self._rr.log(self._entity, msg, **self._kw)

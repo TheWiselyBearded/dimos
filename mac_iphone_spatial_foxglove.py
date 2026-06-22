@@ -1063,23 +1063,22 @@ def main() -> None:
 
     _lcm_factory = LCMTransport if _lcm_on else None
 
-    def _topic(name, mtype, *, rr_log=True, to_rerun_kwargs=None):
+    def _topic(name, mtype, *, rr_log=True, rerun_as=None, rerun_radius=0.01):
         # rr_log=False marks Foxglove-only topics (no to_rerun equivalent);
-        # tracked objects are shown in Rerun as native boxes (log_object_boxes).
+        # rerun_as="pointcloud" logs real per-point RGB instead of the height colormap.
         return DualPublisher(name, mtype, lcm_factory=_lcm_factory,
                              rerun=(rerun if rr_log else None),
-                             to_rerun_kwargs=to_rerun_kwargs)
+                             rerun_as=rerun_as, rerun_radius=rerun_radius)
 
-    _cloud_kw = {"mode": "points"}
     img_topic = _topic("/color_image", Image)
     ann_topic = _topic("/annotations", ImageAnnotations, rr_log=False)
     cam_info_topic = _topic("/camera_info", CameraInfo)
     depth_cam_info_topic = _topic("/depth_camera_info", CameraInfo)
     depth_topic = _topic("/depth", Image)
-    points_topic = _topic("/points_frame", PointCloud2, to_rerun_kwargs=_cloud_kw)
-    map_topic = _topic("/map", PointCloud2, to_rerun_kwargs=_cloud_kw)
-    acc_cloud_topic = _topic("/accumulated_cloud", PointCloud2, to_rerun_kwargs=_cloud_kw) if args.accumulate_cloud else None
-    obj_cloud_topic = _topic("/object_clouds", PointCloud2, to_rerun_kwargs=_cloud_kw)
+    points_topic = _topic("/points_frame", PointCloud2, rerun_as="pointcloud", rerun_radius=0.008)
+    map_topic = _topic("/map", PointCloud2, rerun_as="pointcloud", rerun_radius=0.02)
+    acc_cloud_topic = _topic("/accumulated_cloud", PointCloud2, rerun_as="pointcloud", rerun_radius=0.008) if args.accumulate_cloud else None
+    obj_cloud_topic = _topic("/object_clouds", PointCloud2, rerun_as="pointcloud", rerun_radius=0.012)
     scene_topic = _topic("/scene_update", SceneUpdate, rr_log=False)
     tf_topic = _topic("/tf", TFMessage)
 
@@ -1261,8 +1260,9 @@ def main() -> None:
             depth_cam_info_topic.publish(cam_info)
             if dets2d is not None:
                 # Upstream removed Foxglove ImageAnnotations support (PR #2122), so
-                # 2D boxes are logged natively to Rerun instead (overlay on the image).
-                rerun.log_detections_2d("world/color_image/detections", dets2d)
+                # 2D boxes are logged natively to Rerun. Same entity as the image so
+                # they overlay it in one 2D view (not an orphan black panel).
+                rerun.log_detections_2d("world/color_image", dets2d)
             depth_topic.publish(depth_msg)
             points_topic.publish(points_msg)
             tf_topic.publish(make_tf_msg(c2w, ts))
