@@ -56,6 +56,7 @@ class RerunViz:
         app_id: str = "dimos_spatial",
         save_path: str | None = None,
         connect: bool = False,
+        send_blueprint: bool = True,
     ) -> None:
         self.enabled = enabled
         self._rr = None
@@ -75,6 +76,35 @@ class RerunViz:
             rr.spawn()
             sink = "spawn (new viewer)"
         logger.info("Rerun viz enabled (%s): %s", app_id, sink)
+        if send_blueprint:
+            self._send_default_blueprint()
+
+    def _send_default_blueprint(self) -> None:
+        """Fixed layout: 3D reconstruction | (color+detections / depth).
+
+        Without this, Rerun's auto-layout overlays the sibling 2D images
+        (color_image, depth) into one view and orphans the detection boxes.
+        """
+        try:
+            import rerun.blueprint as rrb
+
+            bp = rrb.Blueprint(
+                rrb.Horizontal(
+                    rrb.Spatial3DView(
+                        origin="/world", name="3D reconstruction",
+                        # keep the 2D images out of the 3D view
+                        contents=["+ /world/**", "- /world/color_image", "- /world/depth"],
+                    ),
+                    rrb.Vertical(
+                        rrb.Spatial2DView(origin="/world/color_image", name="color + detections"),
+                        rrb.Spatial2DView(origin="/world/depth", name="depth"),
+                    ),
+                ),
+                collapse_panels=True,
+            )
+            self._rr.send_blueprint(bp)
+        except Exception as e:  # noqa: BLE001 - never let layout setup crash the run
+            logger.debug("send_blueprint failed: %s", e)
 
     def set_time(self, ts: float) -> None:
         """Set the active timeline position so a frame's logs share a timestamp."""

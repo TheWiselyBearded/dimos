@@ -817,6 +817,9 @@ def main() -> None:
                              "file instead of spawning a viewer (headless)")
     parser.add_argument("--rerun-connect", action="store_true",
                         help="with --viz rerun/both: connect to an already-running Rerun viewer")
+    parser.add_argument("--rerun-point-radius", type=float, default=None,
+                        help="Rerun point-cloud radius in meters (smaller = cleaner). "
+                             "Forwarded to the dimos pipeline; default 0.008 there.")
 
     # Sidecar
     parser.add_argument(
@@ -945,6 +948,8 @@ def main() -> None:
         dimos_argv += ["--rerun-save", str(args.rerun_save)]
     if args.rerun_connect:
         dimos_argv.append("--rerun-connect")
+    if args.rerun_point_radius is not None:
+        dimos_argv += ["--rerun-point-radius", str(args.rerun_point_radius)]
 
     # Forward map-I/O flags
     if args.save_map is not None:

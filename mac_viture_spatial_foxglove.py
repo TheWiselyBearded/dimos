@@ -856,6 +856,9 @@ def main() -> None:
                           "instead of spawning a viewer (headless).")
     viz.add_argument("--rerun-connect", action="store_true",
                      help="with --viz rerun/both: connect to an already-running Rerun viewer.")
+    viz.add_argument("--rerun-point-radius", type=float, default=0.008,
+                     help="Rerun point-cloud radius in meters (smaller = finer, cleaner "
+                          "cloud; raise if too sparse). Default 0.008.")
 
     args = parser.parse_args()
 
@@ -974,9 +977,10 @@ def main() -> None:
     cam_info_topic = _topic("/camera_info", CameraInfo)
     depth_cam_info_topic = _topic("/depth_camera_info", CameraInfo)
     depth_topic = _topic("/depth", Image)
-    points_topic = _topic("/points_frame", PointCloud2, rerun_as="pointcloud", rerun_radius=0.008)
-    map_topic = _topic("/map", PointCloud2, rerun_as="pointcloud", rerun_radius=0.02)
-    obj_cloud_topic = _topic("/object_clouds", PointCloud2, rerun_as="pointcloud", rerun_radius=0.012)
+    _pr = args.rerun_point_radius
+    points_topic = _topic("/points_frame", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
+    map_topic = _topic("/map", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
+    obj_cloud_topic = _topic("/object_clouds", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
     scene_topic = _topic("/scene_update", SceneUpdate, rr_log=False)
     tf_topic = _topic("/tf", TFMessage)
 

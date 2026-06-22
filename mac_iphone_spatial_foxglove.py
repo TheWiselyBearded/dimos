@@ -93,6 +93,16 @@ ACCUMULATE_CLOUD_MAX_POINTS = 1_200_000
 # ReachyBrain server sets it to forward the list to the robot's web app.
 OBJECT_LIST_SINK = None
 
+# Relocalization trigger + status sink (Phase A). An external integrator (the
+# ReachyBrain server / web button) sets RELOC_REQUEST to ask the running pipeline
+# to capture a short local scan and align it to --reference-map, and may set
+# RELOC_STATUS_SINK to ``sink(status: dict)`` to surface progress/result in the
+# robot UI. Both are inert for standalone dimos runs.
+import threading as _threading
+
+RELOC_REQUEST = _threading.Event()
+RELOC_STATUS_SINK = None
+
 
 # ===========================================================================
 #  Pose / TF helpers
@@ -856,9 +866,10 @@ def main() -> None:
                         help="disable YOLOE 2D detection + ObjectDB tracking (on by default)")
 
     # xr_nav path must be on sys.path before importing cli_args (matches lines above).
-    from xr_nav.cli_args import add_map_io_args, add_keyframe_args
+    from xr_nav.cli_args import add_map_io_args, add_keyframe_args, add_reloc_args
     add_map_io_args(parser)
     add_keyframe_args(parser)
+    add_reloc_args(parser)
 
     perf = parser.add_argument_group("latency tunables")
     perf.add_argument("--objects-process-every-n", type=int, default=OBJECTS_PROCESS_EVERY_N)
@@ -938,6 +949,9 @@ def main() -> None:
     viz.add_argument("--rerun-connect", action="store_true",
                      help="with --viz rerun/both: connect to an already-running Rerun "
                           "viewer (rerun --serve) instead of spawning a new one.")
+    viz.add_argument("--rerun-point-radius", type=float, default=0.008,
+                     help="Rerun point-cloud radius in meters (smaller = finer, cleaner "
+                          "cloud; raise if too sparse). Default 0.008.")
 
     args = parser.parse_args()
 
@@ -962,6 +976,8 @@ def main() -> None:
     from xr_nav.map_io import MapArtifactWriter, NullObjectDB, load_map_bundle
     from xr_nav.keyframe_recorder import KeyframeRecorder
     from xr_nav.cli_args import resolve_cloud_min_observations
+    from xr_nav.reference_map import ReferenceMap
+    from xr_nav.relocalize_live import run_relocalization
 
     source = VideoSource(video_path=args.video, fps_cap=args.max_fps,
                          loop=not args.no_loop)
@@ -1055,6 +1071,56 @@ def main() -> None:
         if args.save_keyframes is not None else None
     )
 
+    # --- Relocalization setup (Phase A) -----------------------------------
+    # Load the reference map as a *fixed* registration target (kept separate from
+    # the live voxel map) and prep the one-shot capture+align state. ``pose_offset``
+    # is T_align (session -> map): identity until a relocalization succeeds, then
+    # right-applied to every live pose so the moved robot localizes inside the
+    # saved map's frame. Everything downstream uses the offset pose, so Foxglove
+    # and Rerun both render the aligned result — no entity re-rooting needed.
+    reference_map = None
+    if args.reference_map is not None:
+        reference_map = ReferenceMap.from_bundle(
+            args.reference_map, keyframes_dir=args.reference_keyframes,
+            min_observations=max(1, args.voxel_min_observations),
+        )
+        if rerun.enabled and len(reference_map) > 0:
+            ref_arch = rerun._rr.Points3D(
+                reference_map.points.astype(np.float32),
+                colors=(np.clip(reference_map.colors, 0.0, 1.0) * 255).astype(np.uint8),
+                radii=0.01,
+            )
+            try:  # static so the reference persists across the whole timeline
+                rerun._rr.log("world/reference_map", ref_arch, static=True)
+            except TypeError:
+                try:
+                    rerun._rr.log("world/reference_map", ref_arch, timeless=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[reloc] reference cloud log failed: {e}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[reloc] reference cloud log failed: {e}")
+
+    pose_offset = np.eye(4, dtype=np.float64)   # T_align (session -> map)
+    reloc_enabled = bool(args.relocalize) and reference_map is not None
+    if args.relocalize and reference_map is None:
+        print("[reloc] WARNING: --relocalize passed without --reference-map; disabled")
+    reloc_capturing = False
+    reloc_buffer: list[np.ndarray] = []         # session-frame world points during a sweep
+    reloc_frames_left = 0
+
+    def _emit_reloc_status(status: dict) -> None:
+        if RELOC_STATUS_SINK is not None:
+            try:
+                RELOC_STATUS_SINK(status)
+            except Exception as e:  # noqa: BLE001 — never let the sink kill the pipeline
+                print(f"[reloc] status sink failed: {e}")
+
+    if reloc_enabled:
+        print(f"[reloc] ON — reference={args.reference_map.name}  "
+              f"capture={args.reloc_capture_frames} frames  "
+              f"fitness>={args.reloc_fitness_threshold}  "
+              f"merge={'on' if args.reloc_merge else 'off'}  (trigger: RELOC_REQUEST)")
+
     spatial_mem = SpatialMemoryAdapter(db_path=args.clip_db) if args.enable_clip_memory else None
 
     vo = MonocularDepthVO(K=K) if args.pose == "vo" else None
@@ -1075,10 +1141,11 @@ def main() -> None:
     cam_info_topic = _topic("/camera_info", CameraInfo)
     depth_cam_info_topic = _topic("/depth_camera_info", CameraInfo)
     depth_topic = _topic("/depth", Image)
-    points_topic = _topic("/points_frame", PointCloud2, rerun_as="pointcloud", rerun_radius=0.008)
-    map_topic = _topic("/map", PointCloud2, rerun_as="pointcloud", rerun_radius=0.02)
-    acc_cloud_topic = _topic("/accumulated_cloud", PointCloud2, rerun_as="pointcloud", rerun_radius=0.008) if args.accumulate_cloud else None
-    obj_cloud_topic = _topic("/object_clouds", PointCloud2, rerun_as="pointcloud", rerun_radius=0.012)
+    _pr = args.rerun_point_radius
+    points_topic = _topic("/points_frame", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
+    map_topic = _topic("/map", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
+    acc_cloud_topic = _topic("/accumulated_cloud", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr) if args.accumulate_cloud else None
+    obj_cloud_topic = _topic("/object_clouds", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
     scene_topic = _topic("/scene_update", SceneUpdate, rr_log=False)
     tf_topic = _topic("/tf", TFMessage)
 
@@ -1113,6 +1180,19 @@ def main() -> None:
         for sf in frame_stream():
             t_start = time.perf_counter()
             ts = sf.ts
+
+            # Relocalization trigger: an external request opens a capture window.
+            # The operator (or the web button) sweeps the head meanwhile; we
+            # accumulate session-frame points and solve once the window fills.
+            if reloc_enabled and RELOC_REQUEST.is_set():
+                RELOC_REQUEST.clear()
+                if not reloc_capturing:
+                    reloc_capturing = True
+                    reloc_buffer = []
+                    reloc_frames_left = max(1, args.reloc_capture_frames)
+                    print(f"[reloc] capture started — sweep the head now "
+                          f"({reloc_frames_left} frames) ...")
+                    _emit_reloc_status({"state": "running", "frames": reloc_frames_left})
 
             small_bgr = cv2.resize(sf.color_bgr, (DW, DH))
             small_rgb = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2RGB)
@@ -1161,6 +1241,12 @@ def main() -> None:
             else:
                 c2w = np.eye(4, dtype=np.float64)
             t_pose = time.perf_counter() - t_pose
+
+            # Apply the relocalization alignment. Identity until a relocalization
+            # succeeds; afterwards every live pose is expressed in the saved map's
+            # frame, so voxel insertion, points, TF, camera and objects all land
+            # aligned with --reference-map (the robot "localizes into" the map).
+            c2w = pose_offset @ c2w
 
             if (keyframe_recorder is not None
                     and n % max(1, args.save_keyframes_every_n) == 0):
@@ -1213,6 +1299,63 @@ def main() -> None:
                 import open3d as o3d
                 points_msg = PointCloud2(pointcloud=o3d.geometry.PointCloud(),
                                          frame_id="world", ts=ts)
+
+            # Relocalization capture + one-shot solve. During capture pose_offset
+            # is identity, so world_pts are session-frame — exactly what we register
+            # against the reference. The solve blocks for ~seconds (FPFH RANSAC),
+            # which is fine for an explicit, operator-triggered recalibration.
+            if reloc_capturing:
+                if len(cam_pts_s) > 0:
+                    reloc_buffer.append(world_pts)
+                reloc_frames_left -= 1
+                if reloc_frames_left <= 0:
+                    reloc_capturing = False
+                    local_xyz = (np.concatenate(reloc_buffer, axis=0)
+                                 if reloc_buffer else np.zeros((0, 3), np.float32))
+                    print(f"[reloc] solving — {len(local_xyz)} local pts vs "
+                          f"{len(reference_map)} reference voxels ...")
+                    _emit_reloc_status({"state": "solving", "n_local": int(len(local_xyz))})
+                    result = run_relocalization(
+                        reference_map, local_xyz,
+                        fitness_threshold=args.reloc_fitness_threshold,
+                    )
+                    print(f"[reloc] {result.message}")
+                    if result.success:
+                        pose_offset = result.T_align
+                        tvec = pose_offset[:3, 3]
+                        # Drop the throwaway recalibration scan (session frame);
+                        # optionally seed the live map with the reference so mapping
+                        # continues on top of it (both now in the map frame).
+                        voxel_map.clear()
+                        if acc_cloud is not None:
+                            acc_cloud = AccumulatedCloud(
+                                voxel=args.accumulate_cloud_voxel,
+                                max_points=args.accumulate_cloud_max_points)
+                        if args.reloc_merge:
+                            voxel_map.load_state(reference_map.voxel_state, replace=True)
+                        if rerun.enabled and len(result.correspondences) > 0:
+                            try:
+                                rerun._rr.log(
+                                    "world/reloc/correspondences",
+                                    rerun._rr.LineStrips3D(
+                                        [c for c in result.correspondences],
+                                        colors=[0, 200, 255], radii=0.004),
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                print(f"[reloc] correspondence log failed: {e}")
+                        _emit_reloc_status({
+                            "state": "ok",
+                            "fitness": round(result.fitness, 3),
+                            "translation": [round(float(x), 3) for x in tvec],
+                            "method": result.method,
+                            "n_local": result.n_local_points,
+                        })
+                    else:
+                        _emit_reloc_status({
+                            "state": "rejected",
+                            "fitness": round(result.fitness, 3),
+                            "message": result.message,
+                        })
 
             dets2d = None
             new_objects: list[Any] = []
