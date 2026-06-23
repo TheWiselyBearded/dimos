@@ -39,6 +39,7 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
+<<<<<<< HEAD
 __all__ = [
     "BoundingBox2D",
     "CameraInfo",
@@ -82,6 +83,8 @@ __all__ = [
     "torch",
     "yaml",
 ]
+=======
+>>>>>>> upstream/main
 
 # Optional CuPy support
 try:  # pragma: no cover - optional dependency
