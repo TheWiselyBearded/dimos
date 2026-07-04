@@ -108,3 +108,6 @@ recording*.db
 
 # Deepwork local progress state
 .slim/deepwork/
+
+# codegraph
+.codegraph/

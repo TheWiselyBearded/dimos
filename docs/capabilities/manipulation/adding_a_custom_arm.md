@@ -1,5 +1,6 @@
-# How to Integrate a New Manipulator Arm
-
+---
+title: "How to Integrate a New Manipulator Arm"
+---
 This guide walks through integrating a new robot arm with DimOS, from writing the hardware adapter to creating blueprints for planning and control.
 
 ## Architecture Overview
@@ -348,9 +349,6 @@ class YourArmAdapter:
 def register(registry: AdapterRegistry) -> None:
     """Register this adapter with the registry."""
     registry.register("yourarm", YourArmAdapter)
-
-
-__all__ = ["YourArmAdapter"]
 ```
 
 ### Key implementation notes
@@ -371,23 +369,6 @@ __all__ = ["YourArmAdapter"]
   ```
 
 ## Step 2: Create Package Files
-
-### \_\_init\_\_.py
-
-```python skip
-"""YourArm manipulator hardware adapter.
-
-Usage:
-    >>> from dimos.hardware.manipulators.yourarm import YourArmAdapter
-    >>> adapter = YourArmAdapter(address="192.168.1.100", dof=6)
-    >>> adapter.connect()
-    >>> positions = adapter.read_joint_positions()
-"""
-
-from dimos.hardware.manipulators.yourarm.adapter import YourArmAdapter
-
-__all__ = ["YourArmAdapter"]
-```
 
 ### How auto-discovery works
 
@@ -650,7 +631,7 @@ def test_write_positions(mock_adapter):
 ### Integration test with coordinator
 
 ```python skip
-from dimos.control.blueprints.basic import coordinator_mock
+from dimos.robot.manipulators.common.mock import coordinator_mock
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 
 # Build and start coordinator with mock hardware
