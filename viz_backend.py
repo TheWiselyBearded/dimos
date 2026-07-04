@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable
 
 import numpy as np
@@ -66,6 +67,11 @@ class RerunViz:
 
         self._rr = rr
         rr.init(app_id)
+        # Rerun's viewer gRPC port defaults to 9876 — which collides with the
+        # ReachyBrain bridge's default. REACHY_RERUN_PORT moves the viewer so the
+        # two can run together (set by scripts/scan.sh). Unset => Rerun default.
+        _port_env = os.environ.get("REACHY_RERUN_PORT")
+        _port = int(_port_env) if _port_env else None
         if save_path:
             rr.save(str(save_path))
             sink = f"save -> {save_path}"
@@ -73,8 +79,8 @@ class RerunViz:
             rr.connect_grpc()
             sink = "connect (existing viewer)"
         else:
-            rr.spawn()
-            sink = "spawn (new viewer)"
+            rr.spawn(**({"port": _port} if _port else {}))
+            sink = f"spawn (new viewer{f', port {_port}' if _port else ''})"
         logger.info("Rerun viz enabled (%s): %s", app_id, sink)
         if send_blueprint:
             self._send_default_blueprint()
