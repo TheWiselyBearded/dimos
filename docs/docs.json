@@ -190,14 +190,14 @@
   "navbar": {
     "links": [
       {
-        "label": "Dimensional",
-        "href": "/"
+        "type": "github",
+        "href": "https://github.com/dimensionalOS/dimos"
       }
     ],
     "primary": {
       "type": "button",
       "label": "Get started",
-      "href": "https://github.com/dimensionalOS/dimos"
+      "href": "https://dimensionalos.com/prototype"
     }
   },
   "contextual": {
