@@ -177,14 +177,6 @@ def main():
     if not VIDEO.exists():
         sys.exit(f"missing video: {VIDEO}")
 
-    try:
-        import depth_pro
-    except ImportError:
-        sys.exit("depth_pro not installed. Install with:\n"
-                 "  /opt/anaconda3/envs/xr-nav/bin/pip install "
-                 "git+https://github.com/apple/ml-depth-pro.git\n"
-                 "Then download checkpoints (~2GB) per the depth_pro README.")
-    import torch
     import open3d as o3d
 
     from dimos.core.transport import LCMTransport
@@ -232,14 +224,12 @@ def main():
     )
     print(f"display: {DW}x{DH}  HFOV={HFOV_DEG}°  fx={DFX:.1f}")
 
-    # ---- Depth Pro ----
-    print(f"loading depth-pro on {DEPTHPRO_DEVICE}...")
-    t0 = time.monotonic()
-    dp_model, dp_transform = depth_pro.create_model_and_transforms()
-    dp_model.eval()
-    dp_device = torch.device(DEPTHPRO_DEVICE)
-    dp_model = dp_model.to(dp_device)
-    print(f"  depth-pro ready in {time.monotonic() - t0:.1f}s")
+    # ---- Depth Pro (shared wrapper in dimos.perception.depth) ----
+    from dimos.perception.depth import DepthProEstimator
+    try:
+        dp_est = DepthProEstimator(device=DEPTHPRO_DEVICE)
+    except ImportError as e:
+        sys.exit(f"{e}\nThen download checkpoints (~2GB) per the depth_pro README.")
 
     # ---- Detection ----
     print("warming detectors (yolo cpu)...")
@@ -300,13 +290,7 @@ def main():
             # Depth Pro inference (metric meters, same resolution as input)
             t_depth = time.perf_counter()
             try:
-                with torch.no_grad():
-                    dp_input = dp_transform(small_rgb).to(dp_device)
-                    pred = dp_model.infer(dp_input, f_px=torch.tensor(DFX).to(dp_device))
-                depth_t = pred["depth"]
-                depth_m = depth_t.detach().cpu().numpy().astype(np.float32)
-                if depth_m.ndim == 3:  # squeeze any batch dim
-                    depth_m = depth_m[0]
+                depth_m, _conf = dp_est.infer(small_rgb, fx=DFX)
             except Exception as e:
                 print(f"  frame {n}: depth-pro failed: {e}")
                 n += 1

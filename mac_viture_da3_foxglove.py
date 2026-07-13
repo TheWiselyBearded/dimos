@@ -322,18 +322,15 @@ def main():
     )
     print(f"display: {DW}x{DH} (scale={scale:.2f})  HFOV={HFOV_DEG}°")
 
-    # ---- DA3 ----
-    print(f"loading DA3 model '{da3_model}' on {da3_device}...")
-    from depth_anything_3.api import DepthAnything3
-    t0 = time.monotonic()
-    # Load pretrained weights via from_pretrained: the bare constructor only builds
-    # the architecture and leaves the net uninitialized, giving a flat near-constant
-    # depth that gets stretched into blocky garbage.
-    da3 = DepthAnything3.from_pretrained(
-        f"depth-anything/{da3_model.upper()}").to(da3_device)
-    # Prediction.is_metric is unreliable (returns {} -> falsy); trust the model name.
-    da3_is_metric = "metric" in da3_model.lower()
-    print(f"  DA3 ready in {time.monotonic() - t0:.1f}s on {da3.device}")
+    # ---- DA3 (shared wrapper in dimos.perception.depth) ----
+    # force_relative=False matches this script's historical behavior of also
+    # trusting Prediction.is_metric; the shared wrapper additionally applies a
+    # first-frame median scale fit in relative mode (same as the main engine).
+    from dimos.perception.depth import DA3Estimator
+    da3_est = DA3Estimator(model_name=da3_model, device=da3_device,
+                           process_res=da3_res, conf_threshold=CONF_THRESHOLD,
+                           force_relative=False,
+                           depth_near=DEPTH_NEAR_M, depth_far=DEPTH_FAR_M)
 
     # ---- Detection (2D + 3D, like mac_unitree_replay_foxglove.py) ----
     print("warming detectors (yolo cpu)...")
@@ -395,36 +392,24 @@ def main():
             # YOLO 2D detections via Detection2DModule (matches unitree script)
             dets2d = det2d.process_image_frame(color_msg)
 
-            # DA3 inference on RGB at display resolution
+            # DA3 inference on RGB at display resolution (conf-gated in the wrapper)
             small_rgb = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2RGB)
             t_da3 = time.perf_counter()
             try:
-                pred = da3.inference(image=[small_rgb], process_res=da3_res)
+                depth_m, _conf = da3_est.infer(small_rgb, fx=DFX)
             except Exception as e:
                 print(f"  frame {n}: DA3 failed: {e}")
                 n += 1
                 continue
             t_da3 = time.perf_counter() - t_da3
 
-            raw_depth = np.nan_to_num(pred.depth[0].astype(np.float32),
-                                      nan=0.0, posinf=0.0, neginf=0.0)
-            is_metric = da3_is_metric or bool(getattr(pred, "is_metric", 0))
-            depth_m = (raw_depth if is_metric
-                       else normalize_depth(raw_depth, DEPTH_NEAR_M, DEPTH_FAR_M))
-            # DA3 confidence: zero out low-confidence pixels so from_rgbd skips them
-            if pred.conf is not None:
-                conf = pred.conf[0].astype(np.float32)
-                cmax = float(conf.max()) if conf.size else 1.0
-                if cmax > 1.0:
-                    conf = conf / cmax
-                depth_m = np.where(conf >= CONF_THRESHOLD, depth_m, 0.0).astype(np.float32)
             if not np.isfinite(depth_m).any():
                 n += 1
                 continue
             dh, dw = depth_m.shape
 
             # Per-frame DA3 intrinsics for from_rgbd
-            K_da3 = pred.intrinsics[0] if pred.intrinsics is not None else None
+            K_da3 = da3_est.last_intrinsics
             da3_cam_info = build_da3_camera_info(K_da3, dw, dh, HFOV_DEG)
 
             # Pose: Viture primary, DA3 fallback. Convert to OpenCV optical convention
@@ -432,7 +417,7 @@ def main():
             c2w_raw = pose_provider.for_frame(mp4_idx)
             pose_src = "viture"
             if c2w_raw is None:
-                ext = (pred.extrinsics[0] if pred.extrinsics is not None else None)
+                ext = da3_est.last_extrinsics
                 c2w_raw = pose_provider.fallback_from_da3(ext)
                 pose_src = "da3"
             if c2w_raw is None:

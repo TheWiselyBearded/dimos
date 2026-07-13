@@ -27,12 +27,14 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+import contextlib
 import sys
 import time
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+
+_nullcontext = contextlib.nullcontext
 
 import cv2
 import numpy as np
@@ -214,27 +216,68 @@ def make_camera_info(width: int, height: int, hfov_deg: float):
     )
 
 
-def filter_depth_edges(depth_m: np.ndarray, grad_threshold_m: float,
-                       dilate_px: int) -> np.ndarray:
-    if grad_threshold_m <= 0:
-        return depth_m
-    valid = depth_m > 0
-    gx = cv2.Sobel(depth_m, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(depth_m, cv2.CV_32F, 0, 1, ksize=3)
-    grad_mag = np.sqrt(gx * gx + gy * gy)
-    bad = (grad_mag > grad_threshold_m) & valid
-    if dilate_px > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                      (2 * dilate_px + 1, 2 * dilate_px + 1))
-        bad = cv2.dilate(bad.astype(np.uint8), k).astype(bool)
-    out = depth_m.copy()
-    out[bad] = 0.0
-    return out
+def make_camera_info_from_K(K: np.ndarray, width: int, height: int):
+    """CameraInfo for an already-undistorted image with full (fx, fy, cx, cy)."""
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    return CameraInfo(
+        frame_id="camera_optical", height=height, width=width,
+        distortion_model="plumb_bob", D=[0.0] * 5,
+        K=[fx, 0, cx, 0, fy, cy, 0, 0, 1],
+        R=[1, 0, 0, 0, 1, 0, 0, 0, 1],
+        P=[fx, 0, cx, 0, 0, fy, cy, 0, 0, 0, 1, 0],
+        binning_x=0, binning_y=0,
+    )
+
+
+def load_camera_calibration(path: Path) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+    """Load calibrated intrinsics from disk.
+
+    Accepts either a ROS-style CameraInfo YAML (``dimos cameracalibrate`` /
+    ``CameraInfo.from_yaml``) or the ``PinholeCameraParameters`` JSON written by
+    ``xr-nav/scripts/calibrate_reachy_solve.py`` (``reachy_mini_intrinsics.json``).
+
+    Returns (K 3x3, D coeffs, (calib_width, calib_height)) at the calibration's
+    native resolution.
+    """
+    suffix = path.suffix.lower()
+    if suffix in (".yaml", ".yml"):
+        from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
+        info = CameraInfo.from_yaml(str(path))
+        return info.get_K_matrix(), info.get_D_coeffs(), (info.width, info.height)
+    if suffix == ".json":
+        import json
+        with open(path) as f:
+            data = json.load(f)
+        intr = data["intrinsic"]
+        K = np.asarray(intr["intrinsic_matrix"], dtype=np.float64).reshape(3, 3)
+        # calibrate_reachy_solve.py flattens row-major; genuine Open3D
+        # PinholeCameraParameters JSONs are column-major. A valid K has
+        # bottom row [0, 0, 1] — transpose if it landed in the right column.
+        if not np.allclose(K[2], [0, 0, 1]) and np.allclose(K[:, 2][:2], 0):
+            K = K.T
+        D = np.asarray(data.get("distortion", {}).get("coeffs", []), dtype=np.float64)
+        return K, D, (int(intr["width"]), int(intr["height"]))
+    sys.exit(f"--camera-info: unsupported format {path.suffix!r} (need .yaml/.yml/.json)")
 
 
 def depth_to_confidence(depth_m: np.ndarray) -> np.ndarray:
     conf = np.where(depth_m > 0, 1.0 / np.maximum(depth_m, 0.1) ** 2, 0.0)
     return conf.astype(np.float32)
+
+
+def unproject_depth_subsampled(depth_m: np.ndarray, K: np.ndarray,
+                               stride: int = 8) -> np.ndarray:
+    """Sparse camera-frame unprojection for scale-alignment correspondences."""
+    H, W = depth_m.shape
+    uu, vv = np.meshgrid(np.arange(0, W, stride), np.arange(0, H, stride))
+    d = depth_m[vv, uu]
+    valid = d > 0
+    uu, vv, d = uu[valid], vv[valid], d[valid]
+    X = (uu - K[0, 2]) * d / K[0, 0]
+    Y = (vv - K[1, 2]) * d / K[1, 1]
+    return np.column_stack([X, Y, d]).astype(np.float32)
 
 
 # ===========================================================================
@@ -423,168 +466,17 @@ class MonocularDepthVO:
 
 
 # ===========================================================================
-#  Depth estimators
+#  Depth estimators — shared wrappers in dimos.perception.depth
 # ===========================================================================
 
-class DepthEstimator(ABC):
-    name: str = "base"
-    # If True, the main loop will skip the depth-edge filter because per-pixel
-    # gradients reflect amplified noise rather than real surface discontinuities.
-    skip_edge_filter: bool = False
-
-    @abstractmethod
-    def infer(self, color_rgb: np.ndarray, fx: float) -> tuple[np.ndarray, np.ndarray]: ...
-
-
-class DepthProEstimator(DepthEstimator):
-    name = "depthpro"
-
-    def __init__(self, device: str = "mps"):
-        try:
-            import depth_pro
-        except ImportError:
-            sys.exit(
-                "depth_pro not installed. Install with:\n"
-                "  /opt/anaconda3/envs/xr-nav/bin/pip install "
-                "git+https://github.com/apple/ml-depth-pro.git"
-            )
-        import torch
-        self._torch = torch
-        print(f"[depth] loading depth-pro on {device}...")
-        t0 = time.monotonic()
-        model, transform = depth_pro.create_model_and_transforms()
-        model.eval()
-        self._model = model.to(torch.device(device))
-        self._transform = transform
-        self._device = torch.device(device)
-        print(f"[depth] depth-pro ready in {time.monotonic() - t0:.1f}s")
-
-    def infer(self, color_rgb, fx):
-        with self._torch.no_grad():
-            inp = self._transform(color_rgb).to(self._device)
-            f_px = self._torch.tensor(float(fx), dtype=self._torch.float32, device=self._device)
-            pred = self._model.infer(inp, f_px=f_px)
-            depth_m = pred["depth"].detach().cpu().numpy().astype(np.float32)
-        if depth_m.ndim == 3:
-            depth_m = depth_m[0]
-        conf = np.ones_like(depth_m, dtype=np.float32)
-        # Drop GPU tensors before clearing the cache, otherwise the freed memory
-        # is still pinned by the live references and the next frame compounds.
-        del inp, f_px, pred
-        try:
-            if self._device.type == "mps":
-                self._torch.mps.empty_cache()
-            elif self._device.type == "cuda":
-                self._torch.cuda.empty_cache()
-        except Exception:
-            pass
-        return depth_m, conf
-
-
-class DA3Estimator(DepthEstimator):
-    name = "da3"
-
-    def __init__(self, model_name: str = "da3metric-large", device: str = "mps",
-                 process_res: int = 504, conf_threshold: float = 0.0,
-                 force_relative: bool = False):
-        from depth_anything_3.api import DepthAnything3
-        print(f"[depth] loading {model_name} on {device}...")
-        # The DepthAnything3 constructor only builds the architecture; pretrained
-        # weights load via from_pretrained (PyTorchModelHubMixin). A bare constructor
-        # leaves the net uninitialized -- its near-constant output gets stretched into
-        # blocky garbage -- so on every platform (the macOS fork included) load weights
-        # via from_pretrained, then move to device.
-        self._model = DepthAnything3.from_pretrained(
-            f"depth-anything/{model_name.upper()}").to(device)
-        # Prediction.is_metric is unreliable (returns {} -> falsy); trust the model name.
-        self._metric_model = "metric" in model_name.lower()
-        self._res = process_res
-        self._conf_thresh = conf_threshold
-        self._force_relative = force_relative
-        self._scale: float | None = None
-        self._conf_logged = False
-        self._raw_logged = False
-
-    def infer(self, color_rgb, fx):
-        pred = self._model.inference(image=[color_rgb], process_res=self._res)
-        raw = np.nan_to_num(pred.depth[0].astype(np.float32),
-                            nan=0.0, posinf=0.0, neginf=0.0)
-        try:
-            import torch
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
-            elif torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-        is_metric = (self._metric_model or bool(getattr(pred, "is_metric", 0))) and not self._force_relative
-        if not self._raw_logged:
-            r_pos = raw[raw > 0]
-            r_range_val = float(r_pos.max() - r_pos.min()) if r_pos.size else 0.0
-            r_range = (f"[{r_pos.min():.3f},{r_pos.max():.3f}] med={float(np.median(r_pos)):.3f}"
-                       if r_pos.size else "[empty]")
-            print(f"[depth] DA3 raw {r_range} is_metric={is_metric} "
-                  f"force_relative={self._force_relative}")
-            # In relative mode, narrow raw range means we'll be stretching tiny
-            # signal + noise across [0.2, 6.0]m. The edge filter sees that noise
-            # as gradients and wipes the map. Auto-disable it and warn loudly.
-            if not is_metric and r_range_val < 0.2:
-                self.skip_edge_filter = True
-                print(f"[depth] WARNING: DA3 raw dynamic range is only {r_range_val:.3f}. "
-                      f"Auto-disabling depth-edge filter (output will be noisy). "
-                      f"For sharp depth on this content, use --depth depthpro.")
-            self._raw_logged = True
-        if is_metric:
-            depth_m = raw
-        else:
-            valid = raw > 0
-            depth_norm = np.zeros_like(raw, dtype=np.float32)
-            if valid.any():
-                vals = raw[valid]
-                rmin, rmax = float(vals.min()), float(vals.max())
-                if rmax - rmin < 1e-8:
-                    depth_norm[valid] = 0.5 * (DEPTH_NEAR_M + DEPTH_FAR_M)
-                else:
-                    d_norm = (vals - rmin) / (rmax - rmin)
-                    depth_norm[valid] = (DEPTH_NEAR_M + d_norm * (DEPTH_FAR_M - DEPTH_NEAR_M)).astype(np.float32)
-            if self._scale is None and valid.any():
-                med = float(np.median(depth_norm[valid]))
-                self._scale = 1.5 / med if med > 1e-6 else 1.0
-                print(f"[depth] DA3 first-frame scale fit: {self._scale:.3f}")
-            scale = self._scale if self._scale is not None else 1.0
-            depth_m = (depth_norm * scale).astype(np.float32)
-
-        conf_map = np.ones_like(depth_m, dtype=np.float32)
-        if pred.conf is not None:
-            c = pred.conf[0].astype(np.float32)
-            cmax = float(c.max()) if c.size else 1.0
-            cmin = float(c.min()) if c.size else 0.0
-            if cmax > 1.0:
-                c = c / cmax
-            conf_map = c
-            if not self._conf_logged:
-                kept = float((c >= self._conf_thresh).mean())
-                print(f"[depth] DA3 conf range=[{cmin:.3f},{cmax:.3f}] "
-                      f"threshold={self._conf_thresh:.2f} kept_frac={kept:.3f}")
-                self._conf_logged = True
-            if self._conf_thresh > 0.0:
-                depth_m = np.where(c >= self._conf_thresh, depth_m, 0.0).astype(np.float32)
-        return depth_m, conf_map
-
-
-def make_depth_estimator(kind: str, device: str = "mps",
-                         da3_conf_threshold: float = 0.0,
-                         da3_force_relative: bool = False,
-                         da3_model: str = "da3metric-large",
-                         da3_process_res: int = 504) -> DepthEstimator:
-    if kind == "depthpro":
-        return DepthProEstimator(device=device)
-    if kind == "da3":
-        return DA3Estimator(model_name=da3_model, device=device,
-                            process_res=da3_process_res,
-                            conf_threshold=da3_conf_threshold,
-                            force_relative=da3_force_relative)
-    raise ValueError(f"unknown depth kind: {kind}")
+from dimos.perception.depth.estimator import (  # noqa: E402
+    DA3Estimator,
+    DepthEstimator,
+    DepthProEstimator,
+    filter_depth_edges,
+    make_depth_estimator,
+    resolve_da3_defaults,
+)
 
 
 # ===========================================================================
@@ -890,7 +782,21 @@ def main() -> None:
                         help="resample input to this width before depth inference")
     parser.add_argument("--hfov-deg", type=float, default=HFOV_DEG,
                         help="horizontal FOV (deg) of the source camera. "
-                             "iPhone wide ~62, ultrawide ~106, 2x telephoto ~30")
+                             "iPhone wide ~62, ultrawide ~106, 2x telephoto ~30. "
+                             "Ignored when --camera-info is given.")
+    parser.add_argument("--camera-info", type=Path, default=None,
+                        help="calibrated intrinsics file: ROS CameraInfo YAML "
+                             "(dimos cameracalibrate) or the PinholeCameraParameters "
+                             "JSON from calibrate_reachy_solve.py. Enables real "
+                             "fx/fy/cx/cy (fed to DepthPro f_px, VO, unprojection) "
+                             "and undistortion when D is non-zero; replaces the "
+                             "--hfov-deg pinhole guess.")
+    parser.add_argument("--camera-k", type=str, default=None,
+                        help="inline intrinsics 'fx,fy,cx,cy,width,height' (native "
+                             "resolution) — bypasses --camera-info and the HFOV "
+                             "guess. Used to forward the robot's advertised camera "
+                             "K so unprojection matches the real lens. Takes "
+                             "precedence over --camera-info; assumes zero distortion.")
     parser.add_argument("--max-fps", type=float, default=10.0,
                         help="upper-bound publish rate; depth model usually sets the real ceiling")
     parser.add_argument("--no-loop", action="store_true",
@@ -948,6 +854,44 @@ def main() -> None:
                     help="DA3-only: trust the model's is_metric flag and use raw output when it's set. "
                          "By default we ignore the flag and always run normalize+scale-fit, which is "
                          "more robust on general phone video where is_metric can be unreliable")
+
+    reg = parser.add_argument_group("frame-to-map registration (Phase B)")
+    reg.add_argument("--registration", choices=["off", "icp"], default="off",
+                     help="Correct residual pose error (backlash / servo lag / "
+                          "calibration) by ICP-aligning each keyframe to the "
+                          "accumulated map. 'off' trusts the kinematic pose verbatim.")
+    reg.add_argument("--icp-estimation", choices=["point_to_point", "point_to_plane"],
+                     default="point_to_plane",
+                     help="ICP estimator. point_to_plane converges better on the "
+                          "walls/floor that dominate a room scan.")
+    reg.add_argument("--icp-max-distance", type=float, default=0.10,
+                     help="ICP max correspondence distance (m). Kinematic poses are "
+                          "already close, so keep this tight.")
+    reg.add_argument("--icp-fitness-threshold", type=float, default=0.3,
+                     help="Reject an ICP correction whose inlier fitness is below this.")
+    reg.add_argument("--icp-correction-gain", type=float, default=0.5,
+                     help="Low-pass gain in [0,1] for each frame's ICP correction; "
+                          "0.5 applies half, damping single-frame noise.")
+    reg.add_argument("--kf-min-baseline", type=float, default=0.02,
+                     help="Keyframe gate: min translation (m) from the last accepted "
+                          "frame before a new one is inserted.")
+    reg.add_argument("--kf-min-rotation-deg", type=float, default=2.0,
+                     help="Keyframe gate: min rotation (deg) from the last accepted frame.")
+
+    mv = parser.add_argument_group("multi-view windowed refinement (Phase C)")
+    mv.add_argument("--mv-window", type=int, default=0,
+                    help="Frames per DA3 multi-view window (0 = off). A background "
+                         "worker runs multi-view inference over sliding windows "
+                         "anchored to kinematic poses, filling a refined map "
+                         "published as /accumulated_cloud_refined. 6–8 is typical.")
+    mv.add_argument("--mv-overlap", type=int, default=2,
+                    help="Frames shared between consecutive multi-view windows.")
+    mv.add_argument("--mv-min-baseline", type=float, default=0.015,
+                    help="Skip a window whose views span less than this (m) — the "
+                         "Umeyama scale fit is ill-conditioned on near-pure rotation.")
+    mv.add_argument("--mv-replace-live", action="store_true",
+                    help="Save the refined multi-view map as the primary map "
+                         "(instead of the live coarse map).")
 
     odb = parser.add_argument_group("object tracking (ObjectDB)")
     odb.add_argument("--objects-distance-threshold", type=float, default=OBJECTS_DIST_THRESHOLD_M,
@@ -1021,36 +965,85 @@ def main() -> None:
     scale = args.display_width / W
     DW = args.display_width
     DH = int(H * scale)
-    cam_info = make_camera_info(DW, DH, args.hfov_deg)
-    fx = cam_info.K[0]
-    K = np.array([[fx, 0, DW / 2.0],
-                  [0, fx, DH / 2.0],
-                  [0, 0, 1.0]], dtype=np.float64)
-    print(f"[main] color {W}x{H} -> resampled {DW}x{DH}  HFOV={args.hfov_deg}°  fx={fx:.1f}")
 
-    # da3metric-* and da3nested-*-large variants return true metric depth; trust
-    # their is_metric flag automatically. Other DA3 variants need the explicit
-    # --da3-trust-is-metric opt-in (default off, since is_metric is unreliable
-    # on those).
-    _model_is_metric = "metric" in args.da3_model
-    _force_relative = not (args.da3_trust_is_metric or _model_is_metric)
-    # Conf threshold default: metric models have a calibrated conf channel that
-    # is worth filtering on; relative models don't, so leave it open.
-    if args.da3_conf_threshold is None:
-        _da3_conf_threshold = 0.5 if _model_is_metric else 0.0
+    # Intrinsics precedence: inline --camera-k (robot-advertised) > calibrated
+    # --camera-info file (real fx/fy/cx/cy + undistortion) > HFOV pinhole guess
+    # (principal point at center, D=0).
+    undistort_maps = None
+    _cam_k_inline = None
+    if args.camera_k is not None:
+        try:
+            _vals = [float(x) for x in args.camera_k.split(",")]
+            if len(_vals) != 6:
+                raise ValueError(f"need fx,fy,cx,cy,width,height; got {len(_vals)} values")
+            fx_k, fy_k, cx_k, cy_k, cw_k, ch_k = _vals
+            _cam_k_inline = (
+                np.array([[fx_k, 0.0, cx_k], [0.0, fy_k, cy_k], [0.0, 0.0, 1.0]],
+                         dtype=np.float64),
+                np.zeros(5, dtype=np.float64),
+                (int(cw_k), int(ch_k)),
+            )
+        except (ValueError, TypeError) as e:
+            sys.exit(f"--camera-k: {e}")
+    if _cam_k_inline is not None:
+        K_native, D_native, (cw, ch) = _cam_k_inline
+        if (cw, ch) != (W, H) and cw > 0 and ch > 0:
+            K_native = K_native.copy()
+            K_native[0, :] *= W / cw
+            K_native[1, :] *= H / ch
+        K = K_native.copy().astype(np.float64)
+        K[0, :] *= DW / W
+        K[1, :] *= DH / H
+        cam_info = make_camera_info_from_K(K, DW, DH)
+        fx = float(K[0, 0])
+        print(f"[main] color {W}x{H} -> resampled {DW}x{DH}  "
+              f"robot fx={K[0,0]:.1f} fy={K[1,1]:.1f} "
+              f"cx={K[0,2]:.1f} cy={K[1,2]:.1f}  (--camera-k)")
+    elif args.camera_info is not None:
+        K_native, D_native, (cw, ch) = load_camera_calibration(args.camera_info)
+        if (cw, ch) != (W, H) and cw > 0 and ch > 0:
+            print(f"[main] WARNING: calibration res {cw}x{ch} != source {W}x{H}; "
+                  f"scaling intrinsics")
+            K_native = K_native.copy()
+            K_native[0, :] *= W / cw
+            K_native[1, :] *= H / ch
+        if D_native.size and np.any(np.abs(D_native) > 1e-12):
+            K_rect, _ = cv2.getOptimalNewCameraMatrix(
+                K_native, D_native, (W, H), alpha=0)
+            m1, m2 = cv2.initUndistortRectifyMap(
+                K_native, D_native, None, K_rect, (W, H), cv2.CV_16SC2)
+            undistort_maps = (m1, m2)
+            K_native = K_rect
+            print(f"[main] undistorting frames (D={np.round(D_native, 4).tolist()})")
+        K = K_native.copy().astype(np.float64)
+        K[0, :] *= DW / W
+        K[1, :] *= DH / H
+        cam_info = make_camera_info_from_K(K, DW, DH)
+        fx = float(K[0, 0])
+        print(f"[main] color {W}x{H} -> resampled {DW}x{DH}  "
+              f"calibrated fx={K[0,0]:.1f} fy={K[1,1]:.1f} "
+              f"cx={K[0,2]:.1f} cy={K[1,2]:.1f}  ({args.camera_info.name})")
     else:
-        _da3_conf_threshold = args.da3_conf_threshold
-    # Process-res default: large variants are visibly noisier at 504 on
-    # Reachy-sized scenes; bump to 700 for metric/nested-large.
-    if args.da3_process_res is None:
-        _da3_process_res = 700 if (_model_is_metric or "nested" in args.da3_model) else 504
-    else:
-        _da3_process_res = args.da3_process_res
+        cam_info = make_camera_info(DW, DH, args.hfov_deg)
+        fx = cam_info.K[0]
+        K = np.array([[fx, 0, DW / 2.0],
+                      [0, fx, DH / 2.0],
+                      [0, 0, 1.0]], dtype=np.float64)
+        print(f"[main] color {W}x{H} -> resampled {DW}x{DH}  "
+              f"HFOV={args.hfov_deg}°  fx={fx:.1f}")
+
+    # Per-variant DA3 defaults (conf threshold, process res, metric handling)
+    # are shared with the dimos DepthEstimationModule.
+    _da3_conf_threshold, _da3_process_res, _force_relative = resolve_da3_defaults(
+        args.da3_model, args.da3_conf_threshold, args.da3_process_res,
+        args.da3_trust_is_metric)
     depth_estimator = make_depth_estimator(args.depth, device=args.device,
                                            da3_conf_threshold=_da3_conf_threshold,
                                            da3_force_relative=_force_relative,
                                            da3_model=args.da3_model,
-                                           da3_process_res=_da3_process_res)
+                                           da3_process_res=_da3_process_res,
+                                           depth_near=DEPTH_NEAR_M,
+                                           depth_far=DEPTH_FAR_M)
 
     det2d = None
     object_db = None
@@ -1077,11 +1070,47 @@ def main() -> None:
               f"— kill the process and relaunch\n")
 
     voxel_map = VoxelMap(voxel_size=args.voxel_size, max_range=VOXEL_MAX_RANGE_M)
+    # Raycast FOV-gate up axis must match the world frame: external pose
+    # (e.g. Reachy head_pose in an FLU base frame) is Z-up; VO/identity anchor
+    # the world at the first camera optical frame, where Y points down.
+    _up_axis = "z" if args.pose == "external" else "-y"
     raycast_cfg = RaycastConfig(
-        subsample=VOXEL_RAYCAST_SUBSAMPLE, max_misses=VOXEL_RAYCAST_MAX_MISSES)
+        subsample=VOXEL_RAYCAST_SUBSAMPLE, max_misses=VOXEL_RAYCAST_MAX_MISSES,
+        up_axis=_up_axis)
     acc_cloud = (AccumulatedCloud(voxel=args.accumulate_cloud_voxel,
                                   max_points=args.accumulate_cloud_max_points)
                  if args.accumulate_cloud else None)
+
+    # Multi-view windowed refinement (Phase C). A background worker runs DA3's
+    # multi-view pass over sliding windows of keyframes anchored to their
+    # kinematic poses — making depth mutually consistent across views, which
+    # the single-frame path can't. Its output fills a SECOND voxel map,
+    # published as /accumulated_cloud_refined and (with --mv-replace-live) used
+    # as the saved map. The live path is untouched, so the operator still gets
+    # immediate coarse feedback while the crisper map builds asynchronously.
+    _mv_worker = None
+    _refined_map = None
+    _refined_lock = None
+    if getattr(args, "mv_window", 0) and args.mv_window > 0:
+        import threading as _thr
+        from xr_nav.mv_window import MVWindowConfig, MVWindowWorker, Keyframe as _MVKeyframe
+        _refined_map = VoxelMap(voxel_size=args.voxel_size, max_range=VOXEL_MAX_RANGE_M)
+        _refined_lock = _thr.Lock()
+        _mv_cfg = MVWindowConfig(
+            window=args.mv_window, overlap=args.mv_overlap,
+            stride=max(1, args.points_stride), min_baseline_m=args.mv_min_baseline,
+        )
+
+        def _insert_refined(result) -> None:
+            with _refined_lock:
+                conf = np.ones(len(result.points), dtype=np.float32)
+                _refined_map.insert(result.points, confidences=conf,
+                                    max_drift=args.voxel_max_drift, colors=result.colors)
+
+        _mv_worker = MVWindowWorker(depth_estimator, _mv_cfg, _insert_refined)
+        _mv_worker.start()
+        print(f"[mv] multi-view windowed refinement ON — window={args.mv_window}, "
+              f"overlap={args.mv_overlap}, replace_live={args.mv_replace_live}")
 
     if args.load_map is not None:
         bundle = load_map_bundle(args.load_map)
@@ -1092,12 +1121,43 @@ def main() -> None:
             print("[load] WARNING: bundle contains objects but --no-detect was passed; "
                   "objects will not be loaded")
 
+    # Contribution-session metadata (multi-device mapping): a JSON manifest
+    # describing this capture. Stamped into the v2 bundle's provenance so a
+    # later merge knows which device / depth source produced these voxels, and
+    # written verbatim as session.json next to the keyframes so the whole
+    # capture is a self-contained ContributionSession.
+    import json as _json
+
+    session_meta: dict | None = None
+    bundle_meta: dict | None = None
+    if getattr(args, "session_meta", None):
+        try:
+            session_meta = _json.loads(args.session_meta)
+            _dev = (session_meta.get("device") or {})
+            bundle_meta = {
+                "map_id": session_meta.get("map_id"),
+                "frame": session_meta.get("frame"),
+                "sources": [{
+                    "idx": 0,
+                    "session_id": session_meta.get("session_id"),
+                    "device": _dev.get("type", "unknown"),
+                    "depth_source": (session_meta.get("depth") or {}).get("source", "unknown"),
+                    "depth_scale_applied": 1.0,
+                    "reloc": None,
+                    "n_frames": None,
+                    "contributed_at": session_meta.get("created_at"),
+                }],
+            }
+        except (ValueError, TypeError) as e:
+            print(f"[session-meta] ignoring malformed --session-meta: {e}")
+
     map_writer = MapArtifactWriter(
         save_map=args.save_map,
         save_ply=args.save_ply,
         save_pcd=args.save_pcd,
         save_cloud_with_map=args.save_cloud_with_map,
         cloud_min_observations=resolve_cloud_min_observations(args),
+        meta=bundle_meta,
     )
     keyframe_recorder = (
         KeyframeRecorder(args.save_keyframes, rgb_format=args.keyframe_rgb_format,
@@ -1143,6 +1203,40 @@ def main() -> None:
                 _log_reference_keyframes(rerun._rr, reference_map)
 
     pose_offset = np.eye(4, dtype=np.float64)   # T_align (session -> map)
+
+    # Frame-to-map registration (Phase B): even with good kinematic poses,
+    # residual backlash / calibration error / servo lag leaves each frame a
+    # few mm–deg off the accumulated map. A keyframe gate drops redundant
+    # frames (cheaper, less over-densification); ICP against the map tightens
+    # what's left. Corrections accumulate in _T_reg (a world-frame left-mult,
+    # like pose_offset) and are low-passed so one noisy solve can't jerk the map.
+    _reg_enabled = getattr(args, "registration", "off") == "icp"
+    _T_reg = np.eye(4, dtype=np.float64)
+    _kf_selector = None
+    _icp_cfg = None
+    _drift_tracker = None
+    _icp_target = None            # cached Open3D target (rebuilt every N inserts)
+    _icp_target_age = 0
+    _reg_alpha = float(getattr(args, "icp_correction_gain", 0.5))
+    if _reg_enabled:
+        from xr_nav.icp import (ICPConfig, DriftTracker, align_frame_to_map_cached,
+                                build_target, damp_correction, apply_correction)
+        from xr_nav.keyframe import KeyframeConfig, KeyframeSelector
+        _icp_cfg = ICPConfig(
+            translation_only=False,
+            estimation=args.icp_estimation,
+            max_correspondence_distance=args.icp_max_distance,
+            fitness_threshold=args.icp_fitness_threshold,
+        )
+        _kf_selector = KeyframeSelector(KeyframeConfig(
+            min_baseline=args.kf_min_baseline,
+            min_rotation_deg=args.kf_min_rotation_deg,
+        ))
+        _drift_tracker = DriftTracker()
+        print(f"[reg] frame-to-map ICP ON — {args.icp_estimation}, "
+              f"max_dist={args.icp_max_distance}m, gain={_reg_alpha}, "
+              f"kf baseline>={args.kf_min_baseline}m / rot>={args.kf_min_rotation_deg}°")
+
     reloc_enabled = bool(args.relocalize) and reference_map is not None
     if args.relocalize and reference_map is None:
         print("[reloc] WARNING: --relocalize passed without --reference-map; disabled")
@@ -1166,6 +1260,19 @@ def main() -> None:
 
     spatial_mem = SpatialMemoryAdapter(db_path=args.clip_db) if args.enable_clip_memory else None
 
+    # Relative DA3 variants have per-frame scale wobble on top of the one-shot
+    # first-frame fit. Re-fit each frame's scale against the accumulated map
+    # (median NN distance-ratio, clamped) so the map doesn't smear as the
+    # model's scale drifts. Metric models (DepthPro, da3metric-*) skip this.
+    _scale_align_cfg = None
+    _last_scale = 1.0
+    _scale_ema = 1.0
+    _prev_c2w: np.ndarray | None = None
+    if args.depth == "da3" and _force_relative:
+        from xr_nav.scale_align import ScaleAlignConfig, compute_depth_scale
+        _scale_align_cfg = ScaleAlignConfig()
+        print("[depth] relative DA3: per-frame scale alignment against the map is ON")
+
     vo = MonocularDepthVO(K=K) if args.pose == "vo" else None
     _external_pose_warned = False
     _last_external_c2w: np.ndarray | None = None
@@ -1188,6 +1295,7 @@ def main() -> None:
     points_topic = _topic("/points_frame", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
     map_topic = _topic("/map", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
     acc_cloud_topic = _topic("/accumulated_cloud", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr) if args.accumulate_cloud else None
+    refined_topic = _topic("/accumulated_cloud_refined", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr) if _refined_map is not None else None
     obj_cloud_topic = _topic("/object_clouds", PointCloud2, rerun_as="pointcloud", rerun_radius=_pr)
     scene_topic = _topic("/scene_update", SceneUpdate, rr_log=False)
     tf_topic = _topic("/tf", TFMessage)
@@ -1238,7 +1346,11 @@ def main() -> None:
                           f"({reloc_frames_left} frames) ...")
                     _emit_reloc_status({"state": "running", "frames": reloc_frames_left})
 
-            small_bgr = cv2.resize(sf.color_bgr, (DW, DH))
+            frame_bgr = sf.color_bgr
+            if undistort_maps is not None:
+                frame_bgr = cv2.remap(frame_bgr, undistort_maps[0],
+                                      undistort_maps[1], cv2.INTER_LINEAR)
+            small_bgr = cv2.resize(frame_bgr, (DW, DH))
             small_rgb = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2RGB)
             color_msg = Image.from_numpy(small_bgr, format=ImageFormat.BGR,
                                          frame_id="camera_optical", ts=ts)
@@ -1261,6 +1373,36 @@ def main() -> None:
             edge_thresh = 0.0 if depth_estimator.skip_edge_filter else args.depth_edge_threshold
             depth_m = filter_depth_edges(
                 depth_m, edge_thresh, args.depth_edge_dilate)
+
+            # Per-frame scale re-fit for relative DA3. Runs before VO so pose
+            # tracking sees the corrected depth. Prefer the CURRENT frame's
+            # external pose (available before depth) over the previous frame's
+            # pose — the latter mis-registers the fit during motion; fall back
+            # to _prev_c2w for the VO path (current pose isn't known until after
+            # depth). The fitted scale is EMA-smoothed so a single noisy fit
+            # can't make the whole cloud breathe in/out.
+            if (_scale_align_cfg is not None
+                    and voxel_map.size >= _scale_align_cfg.min_map_points):
+                c2w_for_scale = None
+                if args.pose == "external":
+                    ext = getattr(sf, "c2w", None)
+                    if ext is not None:
+                        c2w_for_scale = pose_offset @ np.asarray(ext, dtype=np.float64)
+                if c2w_for_scale is None:
+                    c2w_for_scale = _prev_c2w
+                if c2w_for_scale is not None:
+                    pts_cam_sub = unproject_depth_subsampled(depth_m, K)
+                    if len(pts_cam_sub) > 0:
+                        map_pts = voxel_map.to_points(min_observations=1)
+                        s, _n_corr = compute_depth_scale(
+                            pts_cam_sub,
+                            c2w_for_scale[:3, :3].astype(np.float32),
+                            c2w_for_scale[:3, 3].astype(np.float32),
+                            map_pts, _scale_align_cfg)
+                        _scale_ema = 0.8 * _scale_ema + 0.2 * s
+                        if abs(_scale_ema - 1.0) > 1e-4:
+                            depth_m = (depth_m * _scale_ema).astype(np.float32)
+                        _last_scale = _scale_ema
 
             t_pose = time.perf_counter()
             if vo is not None:
@@ -1291,6 +1433,7 @@ def main() -> None:
             # frame, so voxel insertion, points, TF, camera and objects all land
             # aligned with --reference-map (the robot "localizes into" the map).
             c2w = pose_offset @ c2w
+            _prev_c2w = c2w
 
             if (keyframe_recorder is not None
                     and n % max(1, args.save_keyframes_every_n) == 0):
@@ -1318,7 +1461,49 @@ def main() -> None:
                 cam_cols_s = cam_cols
 
             if len(cam_pts_s) > 0:
-                world_pts = transform_points(c2w, cam_pts_s)
+                # Apply the accumulated registration correction to the kinematic
+                # pose, then (on keyframes) solve a residual correction against
+                # the map and fold it in. Skipped when registration is off or
+                # during a reloc capture sweep (pose_offset is mid-solve then).
+                c2w_reg = _T_reg @ c2w
+                world_pts = transform_points(c2w_reg, cam_pts_s)
+                if _reg_enabled and not reloc_capturing:
+                    map_pts_reg = voxel_map.to_points(min_observations=1)
+                    accept, reason = _kf_selector.should_accept(
+                        c2w_reg, world_pts, map_pts_reg)
+                    # A fixed-base scanner MUST keep frames that cover new
+                    # geometry — those have low overlap / high NN-distance to
+                    # the current map, which is exactly what should_accept flags
+                    # as "too drifted"/"low overlap". Only DROP genuinely
+                    # redundant frames (near-zero motion, or too few points);
+                    # everything else is inserted. ICP correction, however, only
+                    # runs when there IS good overlap (accept==True) — you can't
+                    # align a frame against geometry the map doesn't hold yet,
+                    # and a low-overlap ICP would drag it to the wrong place.
+                    redundant = reason.startswith("too similar") or reason.startswith("too few")
+                    if redundant:
+                        if n % 30 == 0:
+                            print(f"  frame {n}: skipped — {reason}")
+                        n += 1
+                        continue
+                    if accept:
+                        # Rebuild the cached ICP target every 10 inserts — the
+                        # map churns slowly under --no-prune, so a per-frame
+                        # rebuild (voxel downsample + normals) is wasted work.
+                        if _icp_target is None or _icp_target_age >= 10:
+                            _icp_target = build_target(map_pts_reg, _icp_cfg)
+                            _icp_target_age = 0
+                        T_corr, fitness = align_frame_to_map_cached(
+                            world_pts, map_pts_reg, _icp_cfg, target_pcd=_icp_target)
+                        if fitness > 0.0 and not np.allclose(T_corr, np.eye(4)):
+                            T_apply = damp_correction(T_corr, _reg_alpha)
+                            _T_reg = T_apply @ _T_reg
+                            c2w_reg = T_apply @ c2w_reg
+                            world_pts = apply_correction(world_pts, T_apply)
+                            _drift_tracker.add(T_apply)
+                        _icp_target_age += 1   # inserts since last target rebuild
+                    _kf_selector.mark_accepted(c2w_reg)
+                c2w = c2w_reg
                 if args.use_depth_confidence:
                     rel = world_pts - c2w[:3, 3].astype(np.float32)
                     dist = np.linalg.norm(rel, axis=1)
@@ -1333,6 +1518,12 @@ def main() -> None:
                     voxel_map.prune(float(c2w[0, 3]), float(c2w[1, 3]), float(c2w[2, 3]))
                 if acc_cloud is not None:
                     acc_cloud.add(world_pts, cam_cols_s)
+                # Feed the multi-view refiner with this (world-locked) keyframe.
+                # Uses the registration-corrected pose so windows anchor to the
+                # same trajectory the live map is built on.
+                if _mv_worker is not None and not reloc_capturing:
+                    _mv_worker.submit(_MVKeyframe(
+                        rgb=small_rgb.copy(), c2w=c2w.copy(), K=K.copy(), ts=ts))
 
                 import open3d as o3d
                 pf = o3d.geometry.PointCloud()
@@ -1376,6 +1567,18 @@ def main() -> None:
                     if result.success:
                         pose_offset = result.T_align
                         tvec = pose_offset[:3, 3]
+                        # Reset the registration correction + keyframe/target
+                        # state: the world frame just jumped into the map, so the
+                        # old intra-session correction and cached target no longer
+                        # apply. Mapping restarts cleanly in the map frame.
+                        if _reg_enabled:
+                            _T_reg = np.eye(4, dtype=np.float64)
+                            _icp_target = None
+                            _icp_target_age = 0
+                            _kf_selector = KeyframeSelector(KeyframeConfig(
+                                min_baseline=args.kf_min_baseline,
+                                min_rotation_deg=args.kf_min_rotation_deg,
+                            ))
                         # Drop the throwaway recalibration scan (session frame);
                         # optionally seed the live map with the reference so mapping
                         # continues on top of it (both now in the map frame).
@@ -1433,8 +1636,8 @@ def main() -> None:
                             if n < 3:
                                 print(f"  Object.from_2d_to_list failed: {e}")
 
-                    K_arr = np.array([[fx, 0.0, cam_info.K[2]],
-                                      [0.0, fx, cam_info.K[5]],
+                    K_arr = np.array([[cam_info.K[0], 0.0, cam_info.K[2]],
+                                      [0.0, cam_info.K[4], cam_info.K[5]],
                                       [0.0, 0.0, 1.0]], dtype=np.float64)
                     observed_ids: set[str] = set()
                     if new_objects:
@@ -1478,6 +1681,15 @@ def main() -> None:
                     map_topic.publish(PointCloud2(pointcloud=mp, frame_id="world", ts=ts))
                 if acc_cloud_topic is not None and acc_cloud is not None:
                     acc_cloud_topic.publish(acc_cloud.to_msg(ts))
+                if refined_topic is not None and _refined_map is not None:
+                    with _refined_lock:
+                        rpts, rcols = _refined_map.to_points_colored(min_observations=1)
+                    if len(rpts) > 0:
+                        import open3d as o3d
+                        rp = o3d.geometry.PointCloud()
+                        rp.points = o3d.utility.Vector3dVector(rpts.astype(np.float64))
+                        rp.colors = o3d.utility.Vector3dVector(np.clip(rcols.astype(np.float64), 0, 1))
+                        refined_topic.publish(PointCloud2(pointcloud=rp, frame_id="world", ts=ts))
 
             if object_db is not None and n % OBJECTS_PUBLISH_EVERY_N == 0:
                 from dimos.perception.detection.type.detection3d.object import aggregate_pointclouds
@@ -1530,28 +1742,52 @@ def main() -> None:
                                 f"/{add_stats.get('matched_pixel', 0)}"
                                 f" decayed={len(decay_deleted)}")
                 acc_info = f" acc={acc_cloud.size}" if acc_cloud is not None else ""
+                scale_info = (f" scale={_last_scale:.3f}"
+                              if _scale_align_cfg is not None else "")
                 print(f"  f{n} (src#{sf.frame_idx}): "
                       f"depth={t_depth*1000:.0f}ms pose={t_pose*1000:.0f}ms total={elapsed*1000:.0f}ms "
                       f"d={drange} pts={len(cam_pts_s)} pos=({pos[0]:+.2f},{pos[1]:+.2f},{pos[2]:+.2f}) "
-                      f"voxels={voxel_map.size}{acc_info}{det_info}")
+                      f"voxels={voxel_map.size}{scale_info}{acc_info}{det_info}")
 
             if (map_writer.enabled and args.save_map_every_n > 0
                     and n > 0 and n % args.save_map_every_n == 0):
-                map_writer.write(voxel_map,
-                                 object_db if object_db is not None else NullObjectDB(),
-                                 extra={"frames": n})
+                _save_map = (_refined_map if (args.mv_replace_live and _refined_map is not None)
+                             else voxel_map)
+                with (_refined_lock if _refined_map is not None else _nullcontext()):
+                    map_writer.write(_save_map,
+                                     object_db if object_db is not None else NullObjectDB(),
+                                     extra={"frames": n})
 
             time.sleep(max(0.0, period - (time.perf_counter() - t_start)))
 
     except KeyboardInterrupt:
         print(f"\nstopped after {n} frames.")
     finally:
+        if _mv_worker is not None:
+            _mv_worker.stop()
+            if _mv_worker.dropped:
+                print(f"[mv] {_mv_worker.dropped} window(s) dropped (worker fell behind)")
         if map_writer.enabled:
-            map_writer.write(voxel_map,
-                             object_db if object_db is not None else NullObjectDB(),
-                             extra={"frames": n})
+            _save_map = (_refined_map if (args.mv_replace_live and _refined_map is not None)
+                         else voxel_map)
+            with (_refined_lock if _refined_map is not None else _nullcontext()):
+                map_writer.write(_save_map,
+                                 object_db if object_db is not None else NullObjectDB(),
+                                 extra={"frames": n})
         if keyframe_recorder is not None:
             keyframe_recorder.close()
+            # Drop a ContributionSession manifest next to the keyframes so the
+            # capture is self-describing for a later multi-device merge. Records
+            # the true frame count captured this run.
+            if session_meta is not None:
+                try:
+                    manifest = dict(session_meta)
+                    manifest["n_frames"] = int(keyframe_recorder.count)
+                    session_json = Path(args.save_keyframes) / "session.json"
+                    session_json.write_text(_json.dumps(manifest, indent=2))
+                    print(f"[session-meta] wrote {session_json}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[session-meta] failed to write session.json: {e}")
         try:
             source.close()
         except Exception:

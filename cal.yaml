@@ -1,0 +1,12 @@
+
+image_width: 1280
+image_height: 720
+distortion_model: plumb_bob
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [912.3, 0.0, 654.2, 0.0, 910.8, 351.7, 0.0, 0.0, 1.0]
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.12, -0.31, 0.001, -0.002, 0.15]

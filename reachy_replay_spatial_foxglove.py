@@ -82,6 +82,13 @@ _OPT_TO_BODY = np.array([
     [0.0, 0.0, 0.0, 1.0],
 ], dtype=np.float64)
 
+# Full head -> camera extrinsic (SDK ReachyMini.T_head_cam): the optical
+# rotation above plus the camera's lever arm — 43.7 mm forward, 51.2 mm up of
+# the head frame. head_pose.jsonl records the HEAD pose, so the replay must
+# apply the same lever arm the live path uses or rotation sweeps smear.
+_T_HEAD_CAM = _OPT_TO_BODY.copy()
+_T_HEAD_CAM[:3, 3] = [0.0437, 0.0, 0.0512]
+
 
 # ----------------------------------------------------------------------------
 # Playback clock — shared between the VideoSource and the sidecar publisher.
@@ -392,8 +399,9 @@ class HeadPoseInterpolator:
         self._ts = np.asarray(ts, dtype=np.float64)
         if mats:
             # Convert each body-frame head pose into the optical convention the
-            # pipeline expects, then anchor to the first sample (world=identity).
-            mats = [m @ _OPT_TO_BODY for m in mats]
+            # pipeline expects (rotation + camera lever arm), then anchor to
+            # the first sample (world=identity).
+            mats = [m @ _T_HEAD_CAM for m in mats]
             inv0 = np.linalg.inv(mats[0])
             self._c2w = [inv0 @ m for m in mats]
         else:
@@ -802,6 +810,11 @@ def main() -> None:
     parser.add_argument("--device", default="mps", choices=["mps", "cuda", "cpu"])
     parser.add_argument("--hfov-deg", type=float, default=70.0,
                         help="Reachy Mini camera HFOV in degrees (override if your sensor differs)")
+    parser.add_argument("--camera-info", type=Path, default=None,
+                        help="calibrated intrinsics (reachy_mini_intrinsics.json from "
+                             "calibrate_reachy_solve.py, or a CameraInfo YAML). Forwarded "
+                             "to the dimos pipeline; replaces the --hfov-deg guess and "
+                             "enables undistortion.")
     parser.add_argument("--no-detect", action="store_true")
     parser.add_argument("--no-loop", action="store_true",
                         help="exit after one pass through the recording (default: loop)")
@@ -935,6 +948,8 @@ def main() -> None:
         "--device", args.device,
         "--hfov-deg", str(args.hfov_deg),
     ]
+    if args.camera_info is not None:
+        dimos_argv += ["--camera-info", str(args.camera_info.expanduser().resolve())]
     if args.depth == "da3":
         dimos_argv += ["--da3-model", args.da3_model]
     if args.no_detect:
